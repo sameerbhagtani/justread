@@ -53,6 +53,9 @@ struct OpenDoc {
     drawing: Option<Stroke>,
     /// Last eraser position, so a fast swipe erases everything along its path.
     erasing: Option<(usize, [f32; 2])>,
+    /// Changed during the current drag. Saved once the mouse is released, not on every
+    /// stroke an eraser drag removes.
+    unsaved: bool,
     current: usize,
 }
 
@@ -256,6 +259,7 @@ impl App {
             history: Vec::new(),
             drawing: None,
             erasing: None,
+            unsaved: false,
             current: 0,
         });
         self.wanted.clear();
@@ -396,12 +400,14 @@ impl App {
 
         // The release can happen where page_input doesn't see it: after switching tools
         // mid-stroke, or with the page scrolled out of view.
-        if !ui.input(|i| i.pointer.primary_down()) {
+        let released = !ui.input(|i| i.pointer.primary_down());
+        if released {
             changed |= finish_stroke(doc);
             doc.erasing = None;
         }
+        doc.unsaved |= changed;
 
-        if changed {
+        if released && std::mem::take(&mut doc.unsaved) {
             self.save();
         }
         if wanted != self.wanted {
