@@ -8,6 +8,7 @@ description = "A minimal, fast PDF reader with freehand annotations"
 
 [dependencies]
 eframe = { version = "0.37.0", default-features = false, features = [
+    "clipboard",
     "default_fonts",
     "glow",
     "persistence",
