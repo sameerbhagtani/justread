@@ -4,6 +4,7 @@ mod annot;
 mod app;
 mod commands;
 mod dialogs;
+mod find;
 mod render;
 
 use std::path::PathBuf;

@@ -1,5 +1,5 @@
-//! A background thread that owns the MuPDF document and renders pages on request,
-//! so the UI never blocks on PDF work.
+//! A background thread that owns the MuPDF document and renders and searches pages on
+//! request, so the UI never blocks on PDF work.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,8 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui::{self, ColorImage};
-use mupdf::{Colorspace, Document, Matrix};
+use mupdf::text_page::SearchHitResponse;
+use mupdf::{Colorspace, Document, Matrix, TextPageFlags};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Job {
@@ -17,11 +18,23 @@ pub struct Job {
     pub invert: bool,
 }
 
+/// One search match: the rectangles it covers (several if it wraps onto the next line),
+/// in PDF points from the page's top-left.
+pub type Hit = Vec<egui::Rect>;
+
 enum Request {
     Open(PathBuf),
     /// Replaces the list of pages the UI wants rendered, most important first.
     /// Ignored if its generation is from an earlier document.
     Want(u64, Vec<Job>),
+    /// Replaces any running search with one starting at page `from`. An empty query just
+    /// stops it.
+    Find {
+        generation: u64,
+        id: u64,
+        query: String,
+        from: usize,
+    },
 }
 
 pub enum Reply {
@@ -35,6 +48,22 @@ pub enum Reply {
     },
     Failed(String),
     Page(Job, ColorImage),
+    /// Matches on one page, in reading order. Pages without any aren't sent.
+    Found {
+        id: u64,
+        page: usize,
+        hits: Vec<Hit>,
+    },
+    /// The search with this id has been through every page.
+    FindDone(u64),
+}
+
+struct Search {
+    id: u64,
+    query: String,
+    page: usize,
+    pages_left: usize,
+    page_count: usize,
 }
 
 pub struct Renderer {
@@ -68,12 +97,22 @@ impl Renderer {
     pub fn want(&self, generation: u64, jobs: Vec<Job>) {
         let _ = self.tx.send(Request::Want(generation, jobs));
     }
+
+    pub fn find(&self, generation: u64, id: u64, query: String, from: usize) {
+        let _ = self.tx.send(Request::Find {
+            generation,
+            id,
+            query,
+            from,
+        });
+    }
 }
 
 fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Context>>) {
     let mut doc: Option<Document> = None;
     let mut generation = 0;
     let mut queue: VecDeque<Job> = VecDeque::new();
+    let mut search: Option<Search> = None;
 
     let send = |reply: Reply| {
         let _ = tx.send(reply);
@@ -84,8 +123,11 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
 
     loop {
         // Block when idle; otherwise just pick up whatever arrived since the last page.
-        let next = if queue.is_empty() {
-            rx.recv().ok()
+        let next = if queue.is_empty() && search.is_none() {
+            match rx.recv() {
+                Ok(req) => Some(req),
+                Err(_) => return, // UI is gone
+            }
         } else {
             match rx.try_recv() {
                 Ok(req) => Some(req),
@@ -99,6 +141,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
                 match open(&path) {
                     Ok((d, key, sizes)) => {
                         queue.clear();
+                        search = None;
                         doc = Some(d);
                         generation += 1;
                         send(Reply::Opened {
@@ -125,16 +168,56 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
                 }
                 continue;
             }
-            None if queue.is_empty() => return, // UI is gone
+            Some(Request::Find {
+                generation: for_generation,
+                id,
+                query,
+                from,
+            }) => {
+                if for_generation == generation {
+                    let page_count = doc.as_ref().map_or(0, |d| d.page_count().unwrap_or(0));
+                    search = (!query.is_empty() && page_count > 0).then(|| Search {
+                        id,
+                        query,
+                        page: from % page_count as usize,
+                        pages_left: page_count as usize,
+                        page_count: page_count as usize,
+                    });
+                }
+                continue;
+            }
             None => {}
         }
 
-        let (Some(job), Some(doc)) = (queue.pop_front(), &doc) else {
+        let Some(doc) = &doc else {
+            queue.clear();
+            search = None;
             continue;
         };
-        match render(doc, job) {
-            Ok(image) => send(Reply::Page(job, image)),
-            Err(e) => send(Reply::Failed(format!("page {}: {e}", job.page + 1))),
+        // Rendering comes first, so searching never delays the pages on screen. Searching
+        // goes one page at a time, so new requests are picked up between pages.
+        if let Some(job) = queue.pop_front() {
+            match render(doc, job) {
+                Ok(image) => send(Reply::Page(job, image)),
+                Err(e) => send(Reply::Failed(format!("page {}: {e}", job.page + 1))),
+            }
+        } else if let Some(s) = &mut search {
+            // A page that fails to load just has no matches; an error per page would be noise.
+            if let Ok(hits) = find(doc, s.page, &s.query)
+                && !hits.is_empty()
+            {
+                send(Reply::Found {
+                    id: s.id,
+                    page: s.page,
+                    hits,
+                });
+            }
+            s.page = (s.page + 1) % s.page_count;
+            s.pages_left -= 1;
+            if s.pages_left == 0 {
+                send(Reply::FindDone(s.id));
+                search = None;
+            }
         }
     }
 }
@@ -180,6 +263,23 @@ fn render(doc: &Document, job: Job) -> Result<ColorImage, mupdf::Error> {
     Ok(ColorImage::from_rgb([w, h], &rgb))
 }
 
+fn find(doc: &Document, page: usize, query: &str) -> Result<Vec<Hit>, mupdf::Error> {
+    let page = doc.load_page(page as i32)?;
+    let bounds = page.bounds()?;
+    let origin = egui::vec2(bounds.x0, bounds.y0);
+    let mut hits = Vec::new();
+    let text = page.to_text_page(TextPageFlags::empty())?;
+    text.search_cb(query, &mut hits, |hits, quads| {
+        let rects = quads.iter().map(|q| {
+            let corners = [&q.ul, &q.ur, &q.ll, &q.lr].map(|p| egui::pos2(p.x, p.y) - origin);
+            egui::Rect::from_points(&corners)
+        });
+        hits.push(rects.collect());
+        SearchHitResponse::ContinueSearch
+    })?;
+    Ok(hits)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -190,6 +290,13 @@ mod tests {
     /// page 2 is 300x400 and blank.
     fn fixture() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/two-pages.pdf")
+    }
+
+    /// Page 1 is 300x200 with "Hello world, hello." on a baseline 150pt from its bottom.
+    /// Page 2 is 300x200 with its MediaBox offset by (100, 100), and "say hello" 20pt from
+    /// its left and on a baseline 150pt from its bottom.
+    fn text_fixture() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/text.pdf")
     }
 
     fn pixel(image: &ColorImage, x: usize, y: usize) -> [u8; 3] {
@@ -270,7 +377,7 @@ mod tests {
                 }
                 Reply::Page(..) => continue,
                 Reply::Failed(e) => panic!("{e}"),
-                Reply::Opened { .. } => panic!("opened twice"),
+                _ => panic!("unexpected reply"),
             }
         }
     }
@@ -298,10 +405,61 @@ mod tests {
                 Reply::Page(job, _) if job == wanted => break,
                 Reply::Page(..) => continue,
                 Reply::Failed(_) => failed = true,
-                Reply::Opened { .. } => panic!("opened twice"),
+                _ => panic!("unexpected reply"),
             }
         }
         assert!(failed, "the bad file should still report an error");
+    }
+
+    #[test]
+    fn find_returns_matches_in_page_coordinates() {
+        let (doc, _, _) = open(&text_fixture()).unwrap();
+
+        let hits = find(&doc, 0, "hello").unwrap();
+        assert_eq!(hits.len(), 2, "case-insensitive: Hello and hello");
+        let first = hits[0][0];
+        assert!(first.min.x > 15.0 && first.min.x < 25.0, "{first:?}");
+        // The baseline is 50pt from the top, so the word sits just above it.
+        assert!(first.min.y > 35.0 && first.max.y < 55.0, "{first:?}");
+        assert!(hits[1][0].min.x > first.max.x, "in reading order");
+
+        // Same place on page 2 despite its offset MediaBox.
+        let hit = find(&doc, 1, "hello").unwrap()[0][0];
+        assert!(
+            hit.min.x > 35.0 && hit.min.y > 35.0 && hit.max.y < 55.0,
+            "{hit:?}"
+        );
+
+        assert!(find(&doc, 0, "absent").unwrap().is_empty());
+    }
+
+    #[test]
+    fn worker_searches_every_page_starting_from_the_given_one() {
+        let renderer = Renderer::spawn();
+        let recv = || renderer.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        renderer.open(text_fixture());
+        let Reply::Opened { generation, .. } = recv() else {
+            panic!("expected Opened")
+        };
+
+        renderer.find(generation, 7, "hello".into(), 1);
+        let mut pages = Vec::new();
+        loop {
+            match recv() {
+                Reply::Found { id, page, hits } => {
+                    assert_eq!(id, 7);
+                    pages.push((page, hits.len()));
+                }
+                Reply::FindDone(id) => {
+                    assert_eq!(id, 7);
+                    break;
+                }
+                Reply::Page(..) => {}
+                Reply::Failed(e) => panic!("{e}"),
+                Reply::Opened { .. } => panic!("opened twice"),
+            }
+        }
+        assert_eq!(pages, vec![(1, 1), (0, 2)], "starts at page 2, then wraps");
     }
 
     #[test]
@@ -324,6 +482,7 @@ mod tests {
                 Reply::Opened { generation, .. } => generations.push(generation),
                 Reply::Page(job, _) => assert_ne!(job, stale, "rendered a stale request"),
                 Reply::Failed(e) => panic!("{e}"),
+                _ => panic!("unexpected reply"),
             }
         }
         assert_eq!(generations, vec![1, 2]);

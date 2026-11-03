@@ -10,6 +10,7 @@ use eframe::egui::{
 use crate::annot::{Annotations, Stroke};
 use crate::commands::{self, Command};
 use crate::dialogs::{GoTo, Outcome, Palette};
+use crate::find::{self, Find};
 use crate::render::{Job, Renderer, Reply};
 
 const PAGE_GAP: f32 = 12.0;
@@ -26,6 +27,8 @@ const PEN_COLOR: [u8; 4] = [229, 72, 77, 255];
 const PEN_WIDTH: f32 = 1.5;
 /// In screen points.
 const ERASER_RADIUS: f32 = 6.0;
+const FIND_HIT: Color32 = Color32::from_rgba_unmultiplied_const(255, 200, 0, 80);
+const FIND_CURRENT: Color32 = Color32::from_rgba_unmultiplied_const(255, 120, 0, 140);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
@@ -82,10 +85,13 @@ pub struct App {
     tool: Tool,
     palette: Option<Palette>,
     goto: Option<GoTo>,
+    find: Find,
     /// Shown until `ERROR_DURATION` after the given time.
     error: Option<(String, Instant)>,
     scroll_to: Option<usize>,
     scroll_offset: Option<Vec2>,
+    /// A find match to scroll into view: page, and its rect in PDF points.
+    reveal: Option<(usize, Rect)>,
     /// When the zoom last changed. Cleared once it settles.
     zoomed_at: Option<Instant>,
     /// Last frame's scroll offset and visible rect, for zooming around the cursor.
@@ -119,9 +125,11 @@ impl App {
             tool: Tool::Hand,
             palette: None,
             goto: None,
+            find: Find::default(),
             error: None,
             scroll_to: None,
             scroll_offset: None,
+            reveal: None,
             zoomed_at: None,
             view: None,
             wanted: Vec::new(),
@@ -156,6 +164,8 @@ impl App {
             Command::LastPage => self.scroll_to = Some(last),
             Command::GoToPage if self.doc.is_some() => self.goto = Some(GoTo::default()),
             Command::GoToPage => {}
+            Command::Find if self.doc.is_some() => self.find.open(),
+            Command::Find => {}
             Command::TogglePen => self.toggle_tool(Tool::Pen),
             Command::ToggleEraser => self.toggle_tool(Tool::Eraser),
             Command::Undo => self.undo(),
@@ -226,6 +236,19 @@ impl App {
         self.save();
     }
 
+    fn find_event(&mut self, event: find::Event) {
+        match event {
+            find::Event::None => {}
+            find::Event::Reveal(page, hit) => self.reveal = Some((page, hit)),
+            find::Event::Close => {
+                let id = self.find.close();
+                if let Some(doc) = &self.doc {
+                    self.renderer.find(doc.generation, id, String::new(), 0);
+                }
+            }
+        }
+    }
+
     fn save(&mut self) {
         if let Some(doc) = &self.doc
             && doc.load_error.is_none()
@@ -249,6 +272,11 @@ impl App {
                     sizes,
                 } => self.opened(ctx, generation, path, key, sizes),
                 Reply::Failed(e) => self.show_error(e),
+                Reply::Found { id, page, hits } => {
+                    let event = self.find.found(id, page, hits);
+                    self.find_event(event);
+                }
+                Reply::FindDone(id) => self.find.finished(id),
                 Reply::Page(job, image) => {
                     let Some(doc) = &mut self.doc else { continue };
                     let texture = ctx.load_texture(
@@ -299,6 +327,7 @@ impl App {
             current: 0,
         });
         self.wanted.clear();
+        self.find.restart();
         self.scroll_to = Some(0);
     }
 
@@ -339,6 +368,18 @@ impl App {
             area = area.vertical_scroll_offset(tops[page] - PAGE_GAP);
         } else if let Some(offset) = scroll_offset {
             area = area.scroll_offset(offset);
+        } else if let Some((page, hit)) = self.reveal.take().filter(|&(p, _)| p < tops.len())
+            && let Some((offset, inner)) = self.view
+        {
+            let left = content.x.max(inner.width()) / 2.0 - doc.sizes[page].x * zoom / 2.0;
+            let hit = Rect::from_min_size(
+                pos2(left, tops[page]) + hit.min.to_vec2() * zoom,
+                hit.size() * zoom,
+            );
+            let view = Rect::from_min_size(offset.to_pos2(), inner.size());
+            if let Some(offset) = reveal_offset(view, hit) {
+                area = area.scroll_offset(offset);
+            }
         }
 
         let mut wanted = Vec::new();
@@ -416,6 +457,19 @@ impl App {
                     }
                     None => {
                         painter.rect_filled(rect, 0.0, page_fill);
+                    }
+                }
+
+                for (n, hit) in self.find.hits_on(i).iter().enumerate() {
+                    let color = if self.find.is_current(i, n) {
+                        FIND_CURRENT
+                    } else {
+                        FIND_HIT
+                    };
+                    for r in hit {
+                        let r =
+                            Rect::from_min_size(rect.min + r.min.to_vec2() * zoom, r.size() * zoom);
+                        painter.rect_filled(r, 2.0, color);
                     }
                 }
 
@@ -552,6 +606,25 @@ fn needs_render(have: Option<Job>, want: Job, zooming: bool) -> bool {
         Some(have) if have.invert != want.invert => true,
         Some(have) => !zooming && have != want,
     }
+}
+
+/// The scroll offset that brings `hit` into `view` (both in content coordinates), or None
+/// if it's already in view. A match off-screen vertically lands a third of the way down.
+fn reveal_offset(view: Rect, hit: Rect) -> Option<Vec2> {
+    if view.contains_rect(hit) {
+        return None;
+    }
+    let x = if hit.min.x >= view.min.x && hit.max.x <= view.max.x {
+        view.min.x
+    } else {
+        hit.center().x - view.width() / 2.0
+    };
+    let y = if hit.min.y >= view.min.y && hit.max.y <= view.max.y {
+        view.min.y
+    } else {
+        hit.min.y - view.height() / 3.0
+    };
+    Some(vec2(x, y))
 }
 
 /// Returns true if a stroke was added.
@@ -700,10 +773,16 @@ impl eframe::App for App {
                     self.scroll_to = Some(page);
                 }
             }
+        } else if ctx.memory(|m| m.has_focus(Find::input_id())) {
+            // Typing in the find box: keys like P or the arrows are text, not commands.
         } else if let Some(cmd) = commands::from_keyboard(&ctx) {
             self.run(cmd, &ctx);
         } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-            self.tool = Tool::Hand;
+            if self.find.open {
+                self.find_event(find::Event::Close);
+            } else {
+                self.tool = Tool::Hand;
+            }
         }
 
         let background = if self.dark {
@@ -717,6 +796,16 @@ impl eframe::App for App {
                 self.pages_ui(ui);
                 self.status_ui(ui);
             });
+
+        if self.find.open {
+            let event = self.find.show(&ctx);
+            self.find_event(event);
+            if let Some((id, query)) = self.find.due()
+                && let Some(doc) = &self.doc
+            {
+                self.renderer.find(doc.generation, id, query, doc.current);
+            }
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -790,6 +879,23 @@ mod tests {
         assert!(!needs_render(Some(job(1.0, false)), want, true));
         assert!(needs_render(Some(job(1.0, false)), want, false));
         assert!(!needs_render(Some(want), want, false));
+    }
+
+    #[test]
+    fn reveal_scrolls_only_when_the_match_is_out_of_view() {
+        let view = Rect::from_min_size(pos2(0.0, 1000.0), vec2(600.0, 900.0));
+        let at = |x, y| Rect::from_min_size(pos2(x, y), vec2(40.0, 12.0));
+        assert_eq!(reveal_offset(view, at(100.0, 1500.0)), None);
+        assert_eq!(
+            reveal_offset(view, at(100.0, 3000.0)),
+            Some(vec2(0.0, 3000.0 - 300.0)),
+            "below: a third of the way down, same x"
+        );
+        assert_eq!(
+            reveal_offset(view, at(800.0, 1500.0)),
+            Some(vec2(820.0 - 300.0, 1000.0)),
+            "off to the right: centred horizontally, same y"
+        );
     }
 
     #[test]

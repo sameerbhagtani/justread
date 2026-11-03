@@ -10,6 +10,7 @@ pub enum Command {
     FirstPage,
     LastPage,
     GoToPage,
+    Find,
     TogglePen,
     ToggleEraser,
     Undo,
@@ -50,6 +51,7 @@ pub const COMMANDS: &[(Command, &str, &[KeyboardShortcut])] = &[
     (Command::FirstPage, "First page", &[key(NONE, Key::Home)]),
     (Command::LastPage, "Last page", &[key(NONE, Key::End)]),
     (Command::GoToPage, "Go to page…", &[key(CMD, Key::G)]),
+    (Command::Find, "Find…", &[key(CMD, Key::F)]),
     (Command::TogglePen, "Toggle pen", &[key(NONE, Key::P)]),
     (Command::ToggleEraser, "Toggle eraser", &[key(NONE, Key::E)]),
     // Before Undo: egui ignores extra Shift when matching, so Undo's Ctrl+Z would also
