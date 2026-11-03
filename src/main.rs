@@ -36,7 +36,8 @@ fn main() -> eframe::Result {
         .expect("bundled icon is a valid PNG");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("justread")
+            .with_title("JustRead")
+            // Must match justread.desktop, or Wayland shows no icon.
             .with_app_id("justread")
             .with_icon(icon)
             .with_inner_size([900.0, 1000.0])
@@ -44,6 +45,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
+        // Names the settings folder; renaming it forgets saved window sizes.
         "justread",
         options,
         Box::new(move |cc| Ok(Box::new(app::App::new(cc, renderer, bench)))),

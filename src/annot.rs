@@ -32,6 +32,7 @@ pub fn key(pdf_bytes: &[u8]) -> String {
 }
 
 fn path_for(key: &str) -> Option<PathBuf> {
+    // Lowercase on purpose: renaming the folder would orphan everyone's annotations.
     let dirs = directories::ProjectDirs::from("", "", "justread")?;
     Some(
         dirs.data_dir()

@@ -1,6 +1,7 @@
 [package]
 name = "justread"
 version = "0.1.0-rc1"
+authors = ["Sameer Bhagtani <hello@sameerbhagtani.dev>"]
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "A minimal, fast PDF reader with freehand annotations"
@@ -27,7 +28,8 @@ winresource = "0.1.34"
 # Installers, built with `cargo packager` (see the `package` task in mise.toml).
 [package.metadata.packager]
 before-packaging-command = "cargo build --release"
-product-name = "justread"
+product-name = "JustRead"
+publisher = "Sameer Bhagtani"
 identifier = "dev.justread.app"
 category = "Productivity"
 out-dir = "dist"
@@ -39,6 +41,8 @@ mime-type = "application/pdf"
 description = "PDF document"
 
 [package.metadata.packager.deb]
+# Debian package names must be lowercase; this is also the `apt install` name.
+package-name = "justread"
 # Libraries the binary loads at runtime, which dpkg-shlibdeps can't see. The portal is
 # what rfd opens its file dialog through; with none installed, Open does nothing.
 depends = [

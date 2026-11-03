@@ -318,7 +318,7 @@ impl App {
         let name = path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} - justread")));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} - JustRead")));
         self.error = None;
         let (annots, load_error) = match Annotations::load(&key) {
             Ok(annots) => (annots, None),
