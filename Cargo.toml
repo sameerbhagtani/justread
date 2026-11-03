@@ -1,6 +1,6 @@
 [package]
 name = "justread"
-version = "0.1.0-rc1"
+version = "0.1.0-rc2"
 authors = ["Sameer Bhagtani <hello@sameerbhagtani.dev>"]
 edition = "2024"
 license = "AGPL-3.0-only"
