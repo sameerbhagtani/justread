@@ -27,6 +27,9 @@ const PEN_COLOR: [u8; 4] = [229, 72, 77, 255];
 const PEN_WIDTH: f32 = 1.5;
 /// In screen points.
 const ERASER_RADIUS: f32 = 6.0;
+/// Scales trackpad scrolling, which at egui's speed for wheel lines felt about 3x too fast
+/// on a Windows precision touchpad. Picked by feel.
+const TRACKPAD_SPEED: f32 = 0.3;
 const FIND_HIT: Color32 = Color32::from_rgba_unmultiplied_const(255, 200, 0, 80);
 const FIND_CURRENT: Color32 = Color32::from_rgba_unmultiplied_const(255, 120, 0, 140);
 
@@ -103,9 +106,6 @@ pub struct App {
     scroll_offset: Option<Vec2>,
     /// Trackpad scrolling taken out of egui's input, to apply without its smoothing.
     trackpad_scroll: Vec2,
-    /// TEMPORARY, for tuning on Windows: JUSTREAD_TRACKPAD_SPEED scales trackpad scrolling.
-    /// Remove once a value is chosen.
-    trackpad_speed: f32,
     /// A find match to scroll into view: page, and its rect in PDF points.
     reveal: Option<(usize, Rect)>,
     /// When the zoom last changed. Cleared once it settles.
@@ -145,10 +145,6 @@ impl App {
             scroll_to: None,
             scroll_offset: None,
             trackpad_scroll: Vec2::ZERO,
-            trackpad_speed: std::env::var("JUSTREAD_TRACKPAD_SPEED")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1.0),
             reveal: None,
             zoomed_at: None,
             view: None,
@@ -745,7 +741,7 @@ fn trackpad_scroll(event: &egui::Event, line_scroll_speed: f32) -> Option<Vec2> 
     if modifiers.command || (delta.x.fract() == 0.0 && delta.y.fract() == 0.0) {
         return None;
     }
-    let delta = delta * line_scroll_speed;
+    let delta = delta * line_scroll_speed * TRACKPAD_SPEED;
     Some(if modifiers.shift {
         vec2(delta.x + delta.y, 0.0)
     } else {
@@ -869,7 +865,7 @@ impl eframe::App for App {
             .retain(|event| match trackpad_scroll(event, line) {
                 Some(delta) => {
                     if !dialog_open {
-                        self.trackpad_scroll += delta * self.trackpad_speed;
+                        self.trackpad_scroll += delta;
                     }
                     false
                 }
@@ -980,7 +976,7 @@ mod tests {
         let at = |event| trackpad_scroll(&event, 40.0);
         assert_eq!(
             at(wheel(line, vec2(0.0, -0.25), none)),
-            Some(vec2(0.0, -10.0))
+            Some(vec2(0.0, -10.0 * TRACKPAD_SPEED))
         );
         assert_eq!(
             at(wheel(line, vec2(0.0, -1.0), none)),
@@ -994,7 +990,7 @@ mod tests {
         );
         assert_eq!(
             at(wheel(line, vec2(0.0, 0.5), egui::Modifiers::SHIFT)),
-            Some(vec2(20.0, 0.0)),
+            Some(vec2(20.0 * TRACKPAD_SPEED, 0.0)),
             "Shift scrolls sideways"
         );
         let point = egui::MouseWheelUnit::Point;
