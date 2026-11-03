@@ -101,6 +101,8 @@ pub struct App {
     error: Option<(String, Instant)>,
     scroll_to: Option<usize>,
     scroll_offset: Option<Vec2>,
+    /// Trackpad scrolling taken out of egui's input, to apply without its smoothing.
+    trackpad_scroll: Vec2,
     /// A find match to scroll into view: page, and its rect in PDF points.
     reveal: Option<(usize, Rect)>,
     /// When the zoom last changed. Cleared once it settles.
@@ -137,6 +139,7 @@ impl App {
             error: None,
             scroll_to: None,
             scroll_offset: None,
+            trackpad_scroll: Vec2::ZERO,
             reveal: None,
             zoomed_at: None,
             view: None,
@@ -381,6 +384,7 @@ impl App {
         }
         let zooming = settle_left.is_some();
         let scroll_offset = self.scroll_offset.take();
+        let trackpad_scroll = std::mem::take(&mut self.trackpad_scroll);
         let target = if let Some(page) = self.scroll_to.take().filter(|&p| p < tops.len()) {
             Some(vec2(
                 self.view.map_or(0.0, |(o, _)| o.x),
@@ -400,6 +404,10 @@ impl App {
             };
             let view = Rect::from_min_size(offset.to_pos2(), inner.size());
             reveal_offset(view, placed.rect_to_screen(hit))
+        } else if trackpad_scroll != Vec2::ZERO
+            && let Some((offset, _)) = self.view
+        {
+            Some(offset - trackpad_scroll)
         } else {
             None
         };
@@ -707,6 +715,33 @@ fn shown_size(size: Vec2, turns: u8) -> Vec2 {
     }
 }
 
+/// How far a trackpad scroll event moves the content, in points, if it is one.
+///
+/// Windows (and X11) report trackpads as fractions of a mouse-wheel line, which egui
+/// smooths out over the next ~0.2 s like wheel notches, so the page keeps moving after
+/// the fingers stop. Whole lines are real wheel notches and keep egui's smoothing.
+/// Ctrl+scroll is zoom, which egui handles.
+fn trackpad_scroll(event: &egui::Event, line_scroll_speed: f32) -> Option<Vec2> {
+    let egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta,
+        modifiers,
+        ..
+    } = *event
+    else {
+        return None;
+    };
+    if modifiers.command || (delta.x.fract() == 0.0 && delta.y.fract() == 0.0) {
+        return None;
+    }
+    let delta = delta * line_scroll_speed;
+    Some(if modifiers.shift {
+        vec2(delta.x + delta.y, 0.0)
+    } else {
+        delta
+    })
+}
+
 /// Returns true if a stroke was added.
 fn finish_stroke(doc: &mut OpenDoc) -> bool {
     let Some(stroke) = doc.drawing.take() else {
@@ -815,6 +850,22 @@ fn paint_stroke(painter: &egui::Painter, stroke: &Stroke, placed: Placed) {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let line = ctx.options(|o| o.input_options.line_scroll_speed);
+        let dialog_open = self.palette.is_some() || self.goto.is_some();
+        raw_input
+            .events
+            .retain(|event| match trackpad_scroll(event, line) {
+                Some(delta) => {
+                    if !dialog_open {
+                        self.trackpad_scroll += delta;
+                    }
+                    false
+                }
+                None => true,
+            });
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // egui sets the title bar's theme during the first frame, while eframe still keeps
@@ -900,6 +951,44 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_fractional_wheel_lines_count_as_trackpad_scrolling() {
+        let wheel = |unit, delta, modifiers| egui::Event::MouseWheel {
+            unit,
+            delta,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers,
+        };
+        let (line, none) = (egui::MouseWheelUnit::Line, egui::Modifiers::NONE);
+        let at = |event| trackpad_scroll(&event, 40.0);
+        assert_eq!(
+            at(wheel(line, vec2(0.0, -0.25), none)),
+            Some(vec2(0.0, -10.0))
+        );
+        assert_eq!(
+            at(wheel(line, vec2(0.0, -1.0), none)),
+            None,
+            "a wheel notch"
+        );
+        assert_eq!(
+            at(wheel(line, vec2(0.0, 0.5), egui::Modifiers::COMMAND)),
+            None,
+            "Ctrl+scroll zooms"
+        );
+        assert_eq!(
+            at(wheel(line, vec2(0.0, 0.5), egui::Modifiers::SHIFT)),
+            Some(vec2(20.0, 0.0)),
+            "Shift scrolls sideways"
+        );
+        let point = egui::MouseWheelUnit::Point;
+        assert_eq!(
+            at(wheel(point, vec2(0.0, 3.5), none)),
+            None,
+            "already unsmoothed"
+        );
+    }
 
     #[test]
     fn layout_stacks_pages_with_gaps() {
