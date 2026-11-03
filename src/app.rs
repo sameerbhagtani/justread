@@ -855,9 +855,9 @@ impl eframe::App for App {
                     self.scroll_to = Some(page);
                 }
             }
-        } else if ctx.memory(|m| m.has_focus(Find::input_id())) {
-            // Typing in the find box: keys like P or the arrows are text, not commands.
-        } else if let Some(cmd) = commands::from_keyboard(&ctx) {
+        } else if let Some(cmd) =
+            commands::from_keyboard(&ctx, ctx.memory(|m| m.has_focus(Find::input_id())))
+        {
             self.run(cmd, &ctx);
         } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             if self.find.open {

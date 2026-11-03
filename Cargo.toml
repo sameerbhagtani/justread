@@ -39,7 +39,24 @@ mime-type = "application/pdf"
 description = "PDF document"
 
 [package.metadata.packager.deb]
-depends = ["libfontconfig1"]
+# Libraries the binary loads at runtime, which dpkg-shlibdeps can't see. The portal is
+# what rfd opens its file dialog through; with none installed, Open does nothing.
+depends = [
+    "libfontconfig1",
+    "libdbus-1-3",
+    "libegl1",
+    "libgl1",
+    "libwayland-client0",
+    "libwayland-egl1",
+    "libx11-6",
+    "libx11-xcb1",
+    "libxcursor1",
+    "libxi6",
+    "libxkbcommon0",
+    "libxkbcommon-x11-0",
+    "libxrender1",
+    "xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde | xdg-desktop-portal-xapp",
+]
 
 [package.metadata.packager.nsis]
 installer-icon = "assets/icon.ico"

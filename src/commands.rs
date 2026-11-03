@@ -84,13 +84,23 @@ pub const COMMANDS: &[(Command, &str, &[KeyboardShortcut])] = &[
     (Command::ToggleDark, "Toggle dark mode", &[key(CMD, Key::D)]),
 ];
 
-pub fn from_keyboard(ctx: &Context) -> Option<Command> {
+/// While typing in a text box, plain keys like P are text, and Ctrl+Z/Y undo the typing.
+pub fn from_keyboard(ctx: &Context, typing: bool) -> Option<Command> {
     ctx.input_mut(|i| {
         COMMANDS
             .iter()
-            .find(|(_, _, keys)| keys.iter().any(|k| i.consume_shortcut(k)))
+            .filter(|(cmd, _, _)| !typing || available_while_typing(*cmd))
+            .find(|(_, _, keys)| {
+                keys.iter()
+                    .filter(|k| !typing || k.modifiers.command)
+                    .any(|k| i.consume_shortcut(k))
+            })
             .map(|(cmd, _, _)| *cmd)
     })
+}
+
+fn available_while_typing(cmd: Command) -> bool {
+    !matches!(cmd, Command::Undo | Command::Redo)
 }
 
 #[cfg(test)]
@@ -122,6 +132,20 @@ mod tests {
                 assert!(!caught, "{cmd:?}'s shortcut also triggers {earlier:?}");
             }
         }
+    }
+
+    #[test]
+    fn typing_keeps_ctrl_shortcuts_but_not_text_keys_or_undo() {
+        let typing = |cmd: Command| {
+            let (_, _, keys) = COMMANDS.iter().find(|(c, _, _)| *c == cmd).unwrap();
+            available_while_typing(cmd) && keys.iter().any(|k| k.modifiers.command)
+        };
+        assert!(typing(Command::Open));
+        assert!(typing(Command::ToggleDark));
+        assert!(!typing(Command::TogglePen), "P is text");
+        assert!(!typing(Command::NextPage), "arrows move the cursor");
+        assert!(!typing(Command::Undo), "undoes the typing instead");
+        assert!(!typing(Command::Redo));
     }
 
     #[test]

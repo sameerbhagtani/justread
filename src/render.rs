@@ -2,6 +2,7 @@
 //! request, so the UI never blocks on PDF work.
 
 use std::collections::VecDeque;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock};
@@ -226,13 +227,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
 }
 
 fn open(path: &Path) -> Result<(Document, String, Vec<egui::Vec2>), String> {
-    let is_pdf = path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-    if !is_pdf {
+    let bytes = read_pdf(path).map_err(|e| e.to_string())?;
+    if !is_pdf(&bytes) {
         return Err("Only PDF files are supported".into());
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let doc = Document::from_bytes(&bytes, "application/pdf").map_err(|e| e.to_string())?;
     if doc.needs_password().unwrap_or(false) {
         return Err("Password-protected PDFs are not supported".into());
@@ -243,6 +241,26 @@ fn open(path: &Path) -> Result<(Document, String, Vec<egui::Vec2>), String> {
         Ok(egui::vec2(b.width(), b.height()))
     });
     Ok((doc, crate::annot::key(&bytes), sizes))
+}
+
+/// Reads the whole file only if its start looks like a PDF, so dropping a large video
+/// doesn't load all of it.
+fn read_pdf(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    (&mut file).take(1024).read_to_end(&mut bytes)?;
+    if is_pdf(&bytes) {
+        file.read_to_end(&mut bytes)?;
+    }
+    Ok(bytes)
+}
+
+/// Goes by content, not extension: downloads and temp files often have none. Readers
+/// accept the header anywhere in the first 1 KB, after junk some generators write.
+fn is_pdf(bytes: &[u8]) -> bool {
+    bytes[..bytes.len().min(1024)]
+        .windows(5)
+        .any(|w| w == b"%PDF-")
 }
 
 /// A page whose size can't be read takes the previous page's (or Letter's, if it's the
@@ -359,9 +377,35 @@ mod tests {
 
     #[test]
     fn rejects_non_pdf_files() {
-        let err = open(Path::new("notes.txt")).unwrap_err();
+        let path = std::env::temp_dir().join(format!("justread-{}-notes.pdf", std::process::id()));
+        std::fs::write(&path, "just some notes").unwrap();
+        let err = open(&path).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
         assert!(err.contains("Only PDF"), "{err}");
         assert!(open(Path::new("missing.pdf")).is_err());
+    }
+
+    #[test]
+    fn opens_pdfs_without_a_pdf_extension() {
+        let path = std::env::temp_dir().join(format!("justread-{}-download", std::process::id()));
+        std::fs::copy(fixture(), &path).unwrap();
+        let opened = open(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(opened.unwrap().2.len(), 2);
+    }
+
+    #[test]
+    fn pdf_header_may_follow_leading_junk() {
+        assert!(is_pdf(b"%PDF-1.7\n"));
+        assert!(is_pdf(b"\xef\xbb\xbfjunk\r\n%PDF-1.4"));
+        assert!(!is_pdf(b"PK\x03\x04"));
+        assert!(!is_pdf(
+            &[b' '; 2000]
+                .iter()
+                .chain(b"%PDF-1.4")
+                .copied()
+                .collect::<Vec<_>>()
+        ));
     }
 
     #[test]
