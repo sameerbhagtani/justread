@@ -91,10 +91,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
         };
         match next {
             Some(Request::Open(path)) => {
-                queue.clear();
-                doc = None;
+                // On failure keep the old document: the UI is still showing it.
                 match open(&path) {
                     Ok((d, key, sizes)) => {
+                        queue.clear();
                         doc = Some(d);
                         send(Reply::Opened { path, key, sizes });
                         // Head start while the UI is still starting: render page 1 at a guessed
@@ -258,5 +258,32 @@ mod tests {
                 Reply::Opened { .. } => panic!("opened twice"),
             }
         }
+    }
+
+    #[test]
+    fn failed_open_keeps_the_current_document() {
+        let renderer = Renderer::spawn();
+        let recv = || renderer.rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        renderer.open(fixture());
+        assert!(matches!(recv(), Reply::Opened { .. }));
+        renderer.open(PathBuf::from("notes.txt"));
+
+        let wanted = Job {
+            page: 1,
+            scale: 1.0,
+            invert: false,
+        };
+        renderer.want(vec![wanted]);
+        let mut failed = false;
+        loop {
+            match recv() {
+                Reply::Page(job, _) if job == wanted => break,
+                Reply::Page(..) => continue,
+                Reply::Failed(_) => failed = true,
+                Reply::Opened { .. } => panic!("opened twice"),
+            }
+        }
+        assert!(failed, "the bad file should still report an error");
     }
 }

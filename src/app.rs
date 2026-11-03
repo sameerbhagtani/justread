@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use eframe::egui::{
-    self, Align2, Color32, CursorIcon, FontId, Rect, ScrollArea, Sense, Shape, TextureHandle,
+    self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, ScrollArea, Sense, Shape, TextureHandle,
     TextureOptions, Theme, Vec2, pos2, vec2,
 };
 
@@ -15,7 +15,8 @@ use crate::render::{Job, Renderer, Reply};
 const PAGE_GAP: f32 = 12.0;
 const ZOOM_STEP: f32 = 1.25;
 const ZOOM_RANGE: (f32, f32) = (0.25, 5.0);
-/// Largest texture side we ask for; GPUs commonly cap at 8192 to 16384.
+/// Largest texture side we ask for, even if the GPU allows more: past this a single page
+/// costs hundreds of MB.
 const MAX_TEXTURE_SIDE: f32 = 8192.0;
 const PEN_COLOR: [u8; 4] = [229, 72, 77, 255];
 /// In PDF points.
@@ -41,6 +42,8 @@ struct OpenDoc {
     sizes: Vec<Vec2>,
     textures: HashMap<usize, (Job, TextureHandle)>,
     annots: Annotations,
+    /// False when an existing annotations file couldn't be read, so saving would destroy it.
+    writable: bool,
     history: Vec<Edit>,
     drawing: Option<Stroke>,
     current: usize,
@@ -56,6 +59,7 @@ pub struct App {
     goto: Option<GoTo>,
     error: Option<String>,
     scroll_to: Option<usize>,
+    scroll_offset: Option<Vec2>,
     /// Last frame's scroll offset and visible rect, for zooming around the cursor.
     view: Option<(Vec2, Rect)>,
     /// Last list sent to the worker, so we only send again when it changes.
@@ -89,6 +93,7 @@ impl App {
             goto: None,
             error: None,
             scroll_to: None,
+            scroll_offset: None,
             view: None,
             wanted: Vec::new(),
             bench,
@@ -125,9 +130,9 @@ impl App {
             Command::TogglePen => self.toggle_tool(Tool::Pen),
             Command::ToggleEraser => self.toggle_tool(Tool::Eraser),
             Command::Undo => self.undo(),
-            Command::ZoomIn => self.set_zoom(self.zoom * ZOOM_STEP),
-            Command::ZoomOut => self.set_zoom(self.zoom / ZOOM_STEP),
-            Command::ZoomReset => self.set_zoom(1.0),
+            Command::ZoomIn => self.zoom_at(self.zoom * ZOOM_STEP, None),
+            Command::ZoomOut => self.zoom_at(self.zoom / ZOOM_STEP, None),
+            Command::ZoomReset => self.zoom_at(1.0, None),
             Command::ToggleDark => {
                 self.dark = !self.dark;
                 ctx.set_theme(theme(self.dark));
@@ -139,10 +144,21 @@ impl App {
         self.tool = if self.tool == tool { Tool::Hand } else { tool };
     }
 
-    fn set_zoom(&mut self, zoom: f32) {
-        self.zoom = zoom.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
-        // Keep the current page in view after the layout changes.
-        self.scroll_to = self.doc.as_ref().map(|d| d.current);
+    /// Zooms keeping the content under `anchor` (default: the middle of the view) in place.
+    fn zoom_at(&mut self, zoom: f32, anchor: Option<Pos2>) {
+        let zoom = zoom.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
+        if let (Some(doc), Some((offset, inner))) = (&self.doc, self.view) {
+            let cursor = anchor.unwrap_or(inner.center()) - inner.min;
+            let zooms = (self.zoom, zoom);
+            self.scroll_offset = Some(zoom_offset(
+                &doc.sizes,
+                zooms,
+                offset,
+                cursor,
+                inner.width(),
+            ));
+        }
+        self.zoom = zoom;
     }
 
     fn undo(&mut self) {
@@ -159,6 +175,7 @@ impl App {
 
     fn save(&mut self) {
         if let Some(doc) = &self.doc
+            && doc.writable
             && let Err(e) = doc.annots.save(&doc.key)
         {
             self.error = Some(format!("Could not save annotations: {e}"));
@@ -194,8 +211,19 @@ impl App {
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} - justread")));
+        self.error = None;
+        let (annots, writable) = match Annotations::load(&key) {
+            Ok(annots) => (annots, true),
+            Err(e) => {
+                self.error = Some(format!(
+                    "Could not read annotations, new ones won't be saved: {e}"
+                ));
+                (Annotations::default(), false)
+            }
+        };
         self.doc = Some(OpenDoc {
-            annots: Annotations::load(&key),
+            annots,
+            writable,
             key,
             sizes,
             textures: HashMap::new(),
@@ -203,12 +231,20 @@ impl App {
             drawing: None,
             current: 0,
         });
-        self.error = None;
         self.wanted.clear();
         self.scroll_to = Some(0);
     }
 
     fn pages_ui(&mut self, ui: &mut egui::Ui) {
+        // Ctrl + scroll (or a touchpad pinch) zooms around the cursor.
+        let (zoom_delta, hover) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
+        if zoom_delta != 1.0
+            && let (Some(pos), Some((_, inner))) = (hover, self.view)
+            && inner.contains(pos)
+        {
+            self.zoom_at(self.zoom * zoom_delta, Some(pos));
+        }
+
         let Some(doc) = &mut self.doc else {
             ui.centered_and_justified(|ui| {
                 ui.weak("Open a PDF - Ctrl+O  ·  Ctrl+K for commands");
@@ -216,28 +252,15 @@ impl App {
             return;
         };
 
-        let (mut tops, mut content) = layout(&doc.sizes, self.zoom);
-
-        // Ctrl + scroll (or a touchpad pinch) zooms, keeping the spot under the cursor in place.
-        let mut new_offset = None;
-        let (zoom_delta, hover) = ui.input(|i| (i.zoom_delta(), i.pointer.hover_pos()));
-        if zoom_delta != 1.0
-            && let (Some(pos), Some((offset, inner))) = (hover, self.view)
-            && inner.contains(pos)
-        {
-            let new_zoom = (self.zoom * zoom_delta).clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
-            let ratio = new_zoom / self.zoom;
-            new_offset = Some(zoom_offset(&tops, offset, pos - inner.min, ratio));
-            self.zoom = new_zoom;
-            (tops, content) = layout(&doc.sizes, self.zoom);
-        }
-
         let zoom = self.zoom;
+        let (tops, content) = layout(&doc.sizes, zoom);
         let pixels_per_point = ui.ctx().pixels_per_point();
+        let max_side = MAX_TEXTURE_SIDE.min(ui.input(|i| i.max_texture_side) as f32);
         let mut area = ScrollArea::both().auto_shrink(false);
+        let scroll_offset = self.scroll_offset.take();
         if let Some(page) = self.scroll_to.take().filter(|&p| p < tops.len()) {
             area = area.vertical_scroll_offset(tops[page] - PAGE_GAP);
-        } else if let Some(offset) = new_offset {
+        } else if let Some(offset) = scroll_offset {
             area = area.scroll_offset(offset);
         }
 
@@ -253,10 +276,7 @@ impl App {
                 Color32::WHITE
             };
 
-            doc.current = tops
-                .iter()
-                .rposition(|&top| top <= viewport.min.y + viewport.height() / 3.0)
-                .unwrap_or(0);
+            doc.current = current_page(&tops, viewport, content.y);
 
             let visible: Vec<usize> = (0..doc.sizes.len())
                 .filter(|&i| {
@@ -276,7 +296,7 @@ impl App {
                 .filter(|&i| i < doc.sizes.len())
             {
                 let size = doc.sizes[i];
-                let scale = (zoom * pixels_per_point).min(MAX_TEXTURE_SIDE / size.x.max(size.y));
+                let scale = (zoom * pixels_per_point).min(max_side / size.x.max(size.y));
                 let job = Job {
                     page: i,
                     scale,
@@ -324,6 +344,12 @@ impl App {
             }
         });
         self.view = Some((output.state.clamped_offset(), output.inner_rect));
+
+        // The release can happen where page_input doesn't see it: after switching tools
+        // mid-stroke, or with the page scrolled out of view.
+        if doc.drawing.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+            changed |= finish_stroke(doc);
+        }
 
         if changed {
             self.save();
@@ -385,16 +411,50 @@ fn layout(sizes: &[Vec2], zoom: f32) -> (Vec<f32>, Vec2) {
 }
 
 /// The scroll offset that keeps the content under `cursor` (relative to the view) in place
-/// after zooming by `ratio`. `tops` is the layout before the zoom.
-fn zoom_offset(tops: &[f32], offset: Vec2, cursor: Vec2, ratio: f32) -> Vec2 {
+/// when zooming from `old` to `new`.
+fn zoom_offset(
+    sizes: &[Vec2],
+    (old, new): (f32, f32),
+    offset: Vec2,
+    cursor: Vec2,
+    view_width: f32,
+) -> Vec2 {
+    let ratio = new / old;
+    let (tops, old_content) = layout(sizes, old);
+    let (_, new_content) = layout(sizes, new);
     let at = offset + cursor;
     // Gaps between pages don't scale, so take the ones above the cursor out first.
     let gaps = tops.iter().filter(|&&top| top <= at.y).count().max(1) as f32 * PAGE_GAP;
+    // Pages are centred, so horizontally it's the distance from the centre that scales.
+    let old_center = old_content.x.max(view_width) / 2.0;
+    let new_center = new_content.x.max(view_width) / 2.0;
     let new_at = vec2(
-        PAGE_GAP + (at.x - PAGE_GAP) * ratio,
+        new_center + (at.x - old_center) * ratio,
         gaps + (at.y - gaps) * ratio,
     );
     new_at - cursor
+}
+
+/// The page whose top is past the top third of the view. At the bottom of the document
+/// it's the last page, since short last pages can never scroll up that far.
+fn current_page(tops: &[f32], viewport: Rect, content_height: f32) -> usize {
+    let scrollable = content_height > viewport.height();
+    if scrollable && viewport.max.y >= content_height - 1.0 {
+        return tops.len().saturating_sub(1);
+    }
+    tops.iter()
+        .rposition(|&top| top <= viewport.min.y + viewport.height() / 3.0)
+        .unwrap_or(0)
+}
+
+/// Returns true if a stroke was added.
+fn finish_stroke(doc: &mut OpenDoc) -> bool {
+    let Some(stroke) = doc.drawing.take() else {
+        return false;
+    };
+    doc.annots.strokes.push(stroke);
+    doc.history.push(Edit::Added);
+    true
 }
 
 /// Returns true if the annotations changed.
@@ -445,14 +505,7 @@ fn page_input(
                     }
                 });
             }
-            if response.drag_stopped()
-                && let Some(stroke) = doc.drawing.take()
-            {
-                doc.annots.strokes.push(stroke);
-                doc.history.push(Edit::Added);
-                return true;
-            }
-            false
+            response.drag_stopped() && finish_stroke(doc)
         }
         Tool::Eraser => {
             if !(response.is_pointer_button_down_on() || response.dragged()) {
@@ -561,25 +614,63 @@ mod tests {
         assert_eq!(content.y, tops[1] + 200.0 + PAGE_GAP);
     }
 
-    #[test]
-    fn zoom_keeps_the_spot_under_the_cursor() {
-        let sizes = [vec2(600.0, 800.0); 3];
-        let (old_zoom, new_zoom) = (1.0, 1.5);
-        let (old_tops, _) = layout(&sizes, old_zoom);
-        let (new_tops, _) = layout(&sizes, new_zoom);
+    /// Where `local` (in PDF points on `page`) ends up in content coordinates.
+    fn content_pos(sizes: &[Vec2], zoom: f32, view_width: f32, page: usize, local: Vec2) -> Vec2 {
+        let (tops, content) = layout(sizes, zoom);
+        let left = content.x.max(view_width) / 2.0 - sizes[page].x * zoom / 2.0;
+        vec2(left, tops[page]) + local * zoom
+    }
 
+    fn assert_zoom_keeps_spot(sizes: &[Vec2], view_width: f32, zooms: (f32, f32)) {
         // Cursor over page 2, 476pt down and 188pt across it.
         let (page, local) = (1, vec2(188.0, 476.0));
         let cursor = vec2(200.0, 300.0);
-        let offset = vec2(PAGE_GAP, old_tops[page]) + local * old_zoom - cursor;
+        let offset = content_pos(sizes, zooms.0, view_width, page, local) - cursor;
 
-        let new_offset = zoom_offset(&old_tops, offset, cursor, new_zoom / old_zoom);
+        let new_offset = zoom_offset(sizes, zooms, offset, cursor, view_width);
 
-        let expected = vec2(PAGE_GAP, new_tops[page]) + local * new_zoom;
+        let expected = content_pos(sizes, zooms.1, view_width, page, local);
         let actual = new_offset + cursor;
         assert!(
             (actual - expected).length() < 0.01,
             "{actual:?} != {expected:?}"
         );
+    }
+
+    #[test]
+    fn zoom_keeps_the_spot_under_the_cursor() {
+        let sizes = [vec2(600.0, 800.0); 3];
+        assert_zoom_keeps_spot(&sizes, 400.0, (1.0, 1.5));
+    }
+
+    #[test]
+    fn zoom_keeps_the_spot_when_pages_are_narrower_than_the_view() {
+        let sizes = [vec2(600.0, 800.0), vec2(300.0, 800.0), vec2(500.0, 800.0)];
+        assert_zoom_keeps_spot(&sizes, 1200.0, (1.0, 1.5));
+        assert_zoom_keeps_spot(&sizes, 1200.0, (1.0, 3.0));
+        assert_zoom_keeps_spot(&sizes, 1200.0, (3.0, 1.0));
+    }
+
+    #[test]
+    fn current_page_follows_the_top_third_of_the_view() {
+        let sizes = [vec2(600.0, 800.0); 4];
+        let (tops, content) = layout(&sizes, 1.0);
+        let view = |top: f32| Rect::from_min_size(pos2(0.0, top), vec2(600.0, 900.0));
+        assert_eq!(current_page(&tops, view(0.0), content.y), 0);
+        assert_eq!(current_page(&tops, view(tops[1] - 200.0), content.y), 1);
+        assert_eq!(current_page(&tops, view(tops[1] - 400.0), content.y), 0);
+    }
+
+    #[test]
+    fn current_page_is_the_last_at_the_bottom() {
+        // Short last pages never reach the top third of a tall view.
+        let sizes = [vec2(600.0, 800.0), vec2(600.0, 200.0), vec2(600.0, 200.0)];
+        let (tops, content) = layout(&sizes, 1.0);
+        let bottom = Rect::from_min_max(pos2(0.0, content.y - 1000.0), pos2(600.0, content.y));
+        assert_eq!(current_page(&tops, bottom, content.y), 2);
+
+        // Everything fits: nothing to scroll, so go by the top third as usual.
+        let all = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 2000.0));
+        assert_eq!(current_page(&tops, all, content.y), 0);
     }
 }

@@ -36,10 +36,14 @@ fn path_for(key: &str) -> Option<PathBuf> {
 }
 
 impl Annotations {
-    pub fn load(key: &str) -> Self {
-        path_for(key)
-            .map(|p| Self::load_from(&p))
-            .unwrap_or_default()
+    /// Fails if a file exists but can't be read or parsed. Callers must not save over it
+    /// then, or the strokes in it would be lost.
+    pub fn load(key: &str) -> std::io::Result<Self> {
+        match path_for(key) {
+            Some(p) => Self::load_from(&p)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display()))),
+            None => Ok(Self::default()),
+        }
     }
 
     pub fn save(&self, key: &str) -> std::io::Result<()> {
@@ -49,11 +53,12 @@ impl Annotations {
         }
     }
 
-    fn load_from(path: &Path) -> Self {
-        std::fs::read(path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+    fn load_from(path: &Path) -> std::io::Result<Self> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Writes to a temp file and renames it, so a crash never leaves a half-written file.
@@ -126,7 +131,7 @@ mod tests {
         };
         let path = temp_path("round-trip");
         annots.save_to(&path).unwrap();
-        assert_eq!(Annotations::load_from(&path), annots);
+        assert_eq!(Annotations::load_from(&path).unwrap(), annots);
         assert!(!path.with_extension("json.tmp").exists());
         std::fs::remove_file(&path).unwrap();
     }
@@ -147,15 +152,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_or_corrupt_file_loads_empty() {
+    fn missing_file_loads_empty() {
         assert_eq!(
-            Annotations::load_from(&temp_path("missing")),
+            Annotations::load_from(&temp_path("missing")).unwrap(),
             Annotations::default()
         );
+    }
 
+    #[test]
+    fn corrupt_file_is_an_error() {
         let path = temp_path("corrupt");
         std::fs::write(&path, "not json").unwrap();
-        assert_eq!(Annotations::load_from(&path), Annotations::default());
+        assert!(Annotations::load_from(&path).is_err());
         std::fs::remove_file(&path).unwrap();
     }
 
