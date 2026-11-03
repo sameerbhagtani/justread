@@ -1,0 +1,50 @@
+[package]
+name = "justread"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "A minimal, fast PDF reader with freehand annotations"
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+    "wayland",
+    "x11",
+] }
+mupdf = { version = "0.8.0", default-features = false, features = ["base14-fonts", "system-fonts"] }
+rfd = "0.17.2"
+pollster = "1.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+blake3 = "1.8.7"
+directories = "6.0.0"
+
+# Installers, built with `cargo packager --release` (see README).
+[package.metadata.packager]
+before-packaging-command = "cargo build --release"
+product-name = "justread"
+identifier = "dev.justread.app"
+category = "Productivity"
+out-dir = "dist"
+icons = ["assets/icon-32.png", "assets/icon-128.png", "assets/icon-256.png", "assets/icon-512.png"]
+
+[[package.metadata.packager.file-associations]]
+extensions = ["pdf"]
+mime-type = "application/pdf"
+description = "PDF document"
+
+[package.metadata.packager.deb]
+depends = ["libfontconfig1"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# MuPDF is big C code; optimise it even in debug builds so `cargo run` renders fast.
+[profile.dev.package."*"]
+opt-level = 3

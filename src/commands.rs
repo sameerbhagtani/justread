@@ -1,0 +1,102 @@
+//! One table drives both the keyboard handling and the command palette, so they can't drift apart.
+
+use eframe::egui::{Context, Key, KeyboardShortcut, Modifiers};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Command {
+    Open,
+    NextPage,
+    PrevPage,
+    FirstPage,
+    LastPage,
+    GoToPage,
+    TogglePen,
+    ToggleEraser,
+    Undo,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    ToggleDark,
+    Palette,
+}
+
+const fn key(modifiers: Modifiers, key: Key) -> KeyboardShortcut {
+    KeyboardShortcut::new(modifiers, key)
+}
+
+const NONE: Modifiers = Modifiers::NONE;
+const CMD: Modifiers = Modifiers::COMMAND;
+const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+
+/// (command, name shown in the palette, shortcuts). The palette displays the first shortcut.
+pub const COMMANDS: &[(Command, &str, &[KeyboardShortcut])] = &[
+    (
+        Command::Palette,
+        "Command palette",
+        &[key(CMD, Key::K), key(CMD_SHIFT, Key::P)],
+    ),
+    (Command::Open, "Open PDF…", &[key(CMD, Key::O)]),
+    (
+        Command::NextPage,
+        "Next page",
+        &[key(NONE, Key::PageDown), key(NONE, Key::ArrowRight)],
+    ),
+    (
+        Command::PrevPage,
+        "Previous page",
+        &[key(NONE, Key::PageUp), key(NONE, Key::ArrowLeft)],
+    ),
+    (Command::FirstPage, "First page", &[key(NONE, Key::Home)]),
+    (Command::LastPage, "Last page", &[key(NONE, Key::End)]),
+    (Command::GoToPage, "Go to page…", &[key(CMD, Key::G)]),
+    (Command::TogglePen, "Toggle pen", &[key(NONE, Key::P)]),
+    (Command::ToggleEraser, "Toggle eraser", &[key(NONE, Key::E)]),
+    (Command::Undo, "Undo annotation", &[key(CMD, Key::Z)]),
+    (
+        Command::ZoomIn,
+        "Zoom in",
+        &[key(CMD, Key::Equals), key(CMD, Key::Plus)],
+    ),
+    (Command::ZoomOut, "Zoom out", &[key(CMD, Key::Minus)]),
+    (Command::ZoomReset, "Reset zoom", &[key(CMD, Key::Num0)]),
+    (Command::ToggleDark, "Toggle dark mode", &[key(CMD, Key::D)]),
+];
+
+pub fn from_keyboard(ctx: &Context) -> Option<Command> {
+    ctx.input_mut(|i| {
+        COMMANDS
+            .iter()
+            .find(|(_, _, keys)| keys.iter().any(|k| i.consume_shortcut(k)))
+            .map(|(cmd, _, _)| *cmd)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_is_listed_once_with_a_name_and_shortcut() {
+        for (i, (cmd, name, keys)) in COMMANDS.iter().enumerate() {
+            assert!(!name.is_empty(), "{cmd:?} has no name");
+            assert!(!keys.is_empty(), "{cmd:?} has no shortcut");
+            for (other, other_name, _) in &COMMANDS[i + 1..] {
+                assert_ne!(cmd, other, "{cmd:?} is listed twice");
+                assert_ne!(name, other_name, "two commands are named {name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_shortcut_is_bound_twice() {
+        let all: Vec<_> = COMMANDS
+            .iter()
+            .flat_map(|(cmd, _, keys)| keys.iter().map(move |k| (cmd, k)))
+            .collect();
+        for (i, (cmd, key)) in all.iter().enumerate() {
+            for (other, other_key) in &all[i + 1..] {
+                assert_ne!(key, other_key, "{cmd:?} and {other:?} share a shortcut");
+            }
+        }
+    }
+}

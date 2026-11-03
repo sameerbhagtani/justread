@@ -1,0 +1,13 @@
+[tools]
+"cargo:cargo-packager" = "0.11.8"
+rust = "1.99.1"
+
+[tasks.ci]
+description = "Run what the build workflow runs: tests, then a release build"
+run = ["cargo test --release", "cargo build --release"]
+
+[tasks.package]
+description = "Run the tests, then build the Linux .deb and .AppImage into dist/"
+# linuxdeploy's bundled strip is too old for Arch's libraries.
+env = { NO_STRIP = "true" }
+run = ["cargo test --release", "cargo packager --release --formats deb,appimage"]

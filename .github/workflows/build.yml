@@ -1,0 +1,41 @@
+name: build
+
+on:
+    push:
+        branches: ["**"] # tags are handled by release.yml
+    pull_request:
+
+jobs:
+    build:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+
+            - name: Install Linux build deps
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libgl1-mesa-dev
+
+            - name: Test
+              run: cargo test --release
+
+            - name: Build
+              run: cargo build --release
+
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: justread-${{ runner.os }}
+                  path: |
+                      target/release/justread
+                      target/release/justread.exe

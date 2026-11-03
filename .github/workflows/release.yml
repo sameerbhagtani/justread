@@ -1,0 +1,68 @@
+# Push a tag like v0.1.0 to build installers on every OS and publish a GitHub Release.
+name: release
+
+on:
+    push:
+        tags: ["v*"]
+
+jobs:
+    package:
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    # Oldest supported Ubuntu, so the Linux build runs on older distros too (glibc).
+                    - os: ubuntu-22.04
+                      formats: --formats deb,appimage
+
+                    - os: windows-latest
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+            - uses: actions/checkout@v7
+
+            - uses: dtolnay/rust-toolchain@stable
+
+            - uses: Swatinem/rust-cache@v2
+
+            - uses: taiki-e/install-action@v2
+              with:
+                  tool: cargo-packager@0.11.8
+
+            - name: Install Linux build deps
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libgl1-mesa-dev libfuse2
+
+            - name: Test
+              run: cargo test --release
+
+            - name: Package
+              run: cargo packager --release ${{ matrix.formats }}
+
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: dist-${{ matrix.os }}
+                  path: |
+                      dist/*.deb
+                      dist/*.AppImage
+                      dist/*.exe
+
+    release:
+        needs: package
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+
+        steps:
+            - uses: actions/download-artifact@v8
+              with:
+                  path: dist
+                  merge-multiple: true
+
+            - uses: softprops/action-gh-release@v3
+              with:
+                  files: dist/*
+                  generate_release_notes: true
