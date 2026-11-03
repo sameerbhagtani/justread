@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "justread"
-version = "0.1.0-rc4"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "directories",
