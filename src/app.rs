@@ -70,6 +70,15 @@ struct OpenDoc {
 }
 
 impl OpenDoc {
+    fn shown_sizes(&self) -> Vec<Vec2> {
+        let turns = |i| self.annots.turns(i);
+        self.sizes
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| shown_size(s, turns(i)))
+            .collect()
+    }
+
     /// A new edit makes the undone ones meaningless, so it clears what redo would apply.
     fn record(&mut self, edit: Edit) {
         self.history.push(edit);
@@ -174,6 +183,8 @@ impl App {
             Command::ZoomIn => self.zoom_at(self.zoom * ZOOM_STEP, None),
             Command::ZoomOut => self.zoom_at(self.zoom / ZOOM_STEP, None),
             Command::ZoomReset => self.zoom_at(1.0, None),
+            Command::RotateClockwise => self.rotate(1),
+            Command::RotateCounterClockwise => self.rotate(3),
             Command::ToggleDark => {
                 self.dark = !self.dark;
                 ctx.set_theme(theme(self.dark));
@@ -196,7 +207,7 @@ impl App {
             let cursor = anchor.unwrap_or(inner.center()) - inner.min;
             let zooms = (self.zoom, zoom);
             self.scroll_offset = Some(zoom_offset(
-                &doc.sizes,
+                &doc.shown_sizes(),
                 zooms,
                 offset,
                 cursor,
@@ -204,6 +215,13 @@ impl App {
             ));
         }
         self.zoom = zoom;
+    }
+
+    fn rotate(&mut self, quarter_turns: u8) {
+        let Some(doc) = &mut self.doc else { return };
+        doc.annots.rotate(doc.current, quarter_turns);
+        self.scroll_to = Some(doc.current);
+        self.save();
     }
 
     fn undo(&mut self) {
@@ -351,7 +369,8 @@ impl App {
 
         let zoom = self.zoom;
         let generation = doc.generation;
-        let (tops, content) = layout(&doc.sizes, zoom);
+        let shown = doc.shown_sizes();
+        let (tops, content) = layout(&shown, zoom);
         let pixels_per_point = ui.ctx().pixels_per_point();
         let max_side = MAX_TEXTURE_SIDE.min(ui.input(|i| i.max_texture_side) as f32);
         let settle_left = self
@@ -374,12 +393,15 @@ impl App {
         } else if let Some((page, hit)) = self.reveal.take().filter(|&(p, _)| p < tops.len())
             && let Some((offset, inner)) = self.view
         {
-            let left = content.x.max(inner.width()) / 2.0 - doc.sizes[page].x * zoom / 2.0;
-            let hit = Rect::from_min_size(
-                pos2(left, tops[page]) + hit.min.to_vec2() * zoom,
-                hit.size() * zoom,
-            );
-            reveal_offset(Rect::from_min_size(offset.to_pos2(), inner.size()), hit)
+            let left = content.x.max(inner.width()) / 2.0 - shown[page].x * zoom / 2.0;
+            let placed = Placed {
+                rect: Rect::from_min_size(pos2(left, tops[page]), shown[page] * zoom),
+                size: doc.sizes[page],
+                turns: doc.annots.turns(page),
+                zoom,
+            };
+            let view = Rect::from_min_size(offset.to_pos2(), inner.size());
+            reveal_offset(view, placed.rect_to_screen(hit))
         } else {
             None
         };
@@ -405,9 +427,9 @@ impl App {
 
             doc.current = current_page(&tops, viewport, content.y);
 
-            let visible: Vec<usize> = (0..doc.sizes.len())
+            let visible: Vec<usize> = (0..shown.len())
                 .filter(|&i| {
-                    tops[i] < viewport.max.y && tops[i] + doc.sizes[i].y * zoom > viewport.min.y
+                    tops[i] < viewport.max.y && tops[i] + shown[i].y * zoom > viewport.min.y
                 })
                 .collect();
             let (Some(&first), Some(&last)) = (visible.first(), visible.last()) else {
@@ -428,6 +450,7 @@ impl App {
                     page: i,
                     scale,
                     invert: self.dark,
+                    turns: doc.annots.turns(i),
                 };
                 let have = doc.textures.get(&i).map(|(j, _)| *j);
                 if needs_render(have, job, zooming) {
@@ -449,16 +472,22 @@ impl App {
 
             for &i in &visible {
                 let rect = Rect::from_min_size(
-                    pos2(center_x - doc.sizes[i].x * zoom / 2.0, origin.y + tops[i]),
-                    doc.sizes[i] * zoom,
+                    pos2(center_x - shown[i].x * zoom / 2.0, origin.y + tops[i]),
+                    shown[i] * zoom,
                 );
+                let placed = Placed {
+                    rect,
+                    size: doc.sizes[i],
+                    turns: doc.annots.turns(i),
+                    zoom,
+                };
                 let painter = ui.painter_at(rect);
                 // A texture at the wrong zoom is fine to show until the sharp one arrives,
-                // but one in the wrong colors (light vs dark) would flash.
+                // but one in the wrong colors or rotation would flash.
                 match doc
                     .textures
                     .get(&i)
-                    .filter(|(job, _)| job.invert == self.dark)
+                    .filter(|(job, _)| job.invert == self.dark && job.turns == placed.turns)
                 {
                     Some((_, tex)) => {
                         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -475,14 +504,12 @@ impl App {
                     } else {
                         FIND_HIT
                     };
-                    for r in hit {
-                        let r =
-                            Rect::from_min_size(rect.min + r.min.to_vec2() * zoom, r.size() * zoom);
-                        painter.rect_filled(r, 2.0, color);
+                    for &r in hit {
+                        painter.rect_filled(placed.rect_to_screen(r), 2.0, color);
                     }
                 }
 
-                changed |= page_input(ui, doc, self.tool, i, rect, zoom);
+                changed |= page_input(ui, doc, self.tool, i, placed);
 
                 let strokes = doc
                     .annots
@@ -491,7 +518,7 @@ impl App {
                     .chain(&doc.drawing)
                     .filter(|s| s.page == i);
                 for stroke in strokes {
-                    paint_stroke(&painter, stroke, rect, zoom);
+                    paint_stroke(&painter, stroke, placed);
                 }
             }
         });
@@ -612,7 +639,7 @@ fn current_page(tops: &[f32], viewport: Rect, content_height: f32) -> usize {
 fn needs_render(have: Option<Job>, want: Job, zooming: bool) -> bool {
     match have {
         None => true,
-        Some(have) if have.invert != want.invert => true,
+        Some(have) if have.invert != want.invert || have.turns != want.turns => true,
         Some(have) => !zooming && have != want,
     }
 }
@@ -636,6 +663,52 @@ fn reveal_offset(view: Rect, hit: Rect) -> Option<Vec2> {
     Some(vec2(x, y))
 }
 
+/// Where a page is drawn. Strokes and find matches are kept in unrotated page coordinates,
+/// so they stay on the content when the page is rotated.
+#[derive(Clone, Copy)]
+struct Placed {
+    rect: Rect,
+    size: Vec2,
+    turns: u8,
+    zoom: f32,
+}
+
+impl Placed {
+    fn to_screen(self, p: Vec2) -> Pos2 {
+        self.rect.min + turn(p, self.size, self.turns) * self.zoom
+    }
+
+    fn to_page(self, pos: Pos2) -> Vec2 {
+        let shown = shown_size(self.size, self.turns);
+        turn((pos - self.rect.min) / self.zoom, shown, 4 - self.turns % 4)
+    }
+
+    fn rect_to_screen(self, r: Rect) -> Rect {
+        Rect::from_two_pos(
+            self.to_screen(r.min.to_vec2()),
+            self.to_screen(r.max.to_vec2()),
+        )
+    }
+}
+
+/// Where `p` on a page of `size` ends up after `turns` clockwise quarter turns.
+fn turn(p: Vec2, size: Vec2, turns: u8) -> Vec2 {
+    match turns % 4 {
+        0 => p,
+        1 => vec2(size.y - p.y, p.x),
+        2 => size - p,
+        _ => vec2(p.y, size.x - p.x),
+    }
+}
+
+fn shown_size(size: Vec2, turns: u8) -> Vec2 {
+    if turns % 2 == 1 {
+        vec2(size.y, size.x)
+    } else {
+        size
+    }
+}
+
 /// Returns true if a stroke was added.
 fn finish_stroke(doc: &mut OpenDoc) -> bool {
     let Some(stroke) = doc.drawing.take() else {
@@ -652,21 +725,20 @@ fn page_input(
     doc: &mut OpenDoc,
     tool: Tool,
     page: usize,
-    rect: Rect,
-    zoom: f32,
+    placed: Placed,
 ) -> bool {
     if tool == Tool::Hand {
         return false;
     }
     let response = ui
         .interact(
-            rect,
+            placed.rect,
             ui.scope_id().with(("page", page)),
             Sense::click_and_drag(),
         )
         .on_hover_cursor(CursorIcon::Crosshair);
-    let to_page = |pos: egui::Pos2| {
-        let p = (pos - rect.min) / zoom;
+    let to_page = |pos: Pos2| {
+        let p = placed.to_page(pos);
         [p.x, p.y]
     };
 
@@ -710,7 +782,7 @@ fn page_input(
             };
             doc.erasing = Some((page, to));
             let mut erased = false;
-            while let Some(idx) = doc.annots.hit(page, from, to, ERASER_RADIUS / zoom) {
+            while let Some(idx) = doc.annots.hit(page, from, to, ERASER_RADIUS / placed.zoom) {
                 let stroke = doc.annots.strokes.remove(idx);
                 doc.record(Edit::Erased(idx, stroke));
                 erased = true;
@@ -721,13 +793,14 @@ fn page_input(
     }
 }
 
-fn paint_stroke(painter: &egui::Painter, stroke: &Stroke, rect: Rect, zoom: f32) {
+fn paint_stroke(painter: &egui::Painter, stroke: &Stroke, placed: Placed) {
     let [r, g, b, a] = stroke.color;
     let color = Color32::from_rgba_unmultiplied(r, g, b, a);
+    let zoom = placed.zoom;
     let points: Vec<_> = stroke
         .points
         .iter()
-        .map(|p| rect.min + vec2(p[0], p[1]) * zoom)
+        .map(|p| placed.to_screen(vec2(p[0], p[1])))
         .collect();
     match points.as_slice() {
         [] => {}
@@ -875,6 +948,7 @@ mod tests {
     #[test]
     fn zooming_reuses_stretched_textures_until_it_settles() {
         let job = |scale, invert| Job {
+            turns: 0,
             page: 0,
             scale,
             invert,
@@ -905,6 +979,60 @@ mod tests {
             Some(vec2(820.0 - 300.0, 1000.0)),
             "off to the right: centred horizontally, same y"
         );
+    }
+
+    #[test]
+    fn rotation_moves_corners_clockwise() {
+        let size = vec2(100.0, 200.0);
+        let top_left = vec2(0.0, 0.0);
+        assert_eq!(
+            turn(top_left, size, 1),
+            vec2(200.0, 0.0),
+            "to the top-right"
+        );
+        assert_eq!(
+            turn(top_left, size, 2),
+            vec2(100.0, 200.0),
+            "to the bottom-right"
+        );
+        assert_eq!(
+            turn(top_left, size, 3),
+            vec2(0.0, 100.0),
+            "to the bottom-left"
+        );
+        assert_eq!(shown_size(size, 1), vec2(200.0, 100.0));
+    }
+
+    #[test]
+    fn placed_pages_convert_both_ways_at_every_rotation() {
+        let size = vec2(100.0, 200.0);
+        let p = vec2(10.0, 30.0);
+        for turns in 0..4 {
+            let shown = shown_size(size, turns);
+            let placed = Placed {
+                rect: Rect::from_min_size(pos2(50.0, 70.0), shown * 2.0),
+                size,
+                turns,
+                zoom: 2.0,
+            };
+            let screen = placed.to_screen(p);
+            assert!(placed.rect.contains(screen), "turns {turns}: {screen:?}");
+            assert!(
+                (placed.to_page(screen) - p).length() < 1e-4,
+                "turns {turns}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_alone_forces_a_render_even_while_zooming() {
+        let job = |turns| Job {
+            page: 0,
+            scale: 1.0,
+            invert: false,
+            turns,
+        };
+        assert!(needs_render(Some(job(0)), job(1), true));
     }
 
     #[test]

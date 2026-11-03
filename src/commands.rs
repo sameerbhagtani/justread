@@ -18,6 +18,8 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    RotateClockwise,
+    RotateCounterClockwise,
     ToggleDark,
     Palette,
 }
@@ -69,6 +71,16 @@ pub const COMMANDS: &[(Command, &str, &[KeyboardShortcut])] = &[
     ),
     (Command::ZoomOut, "Zoom out", &[key(CMD, Key::Minus)]),
     (Command::ZoomReset, "Reset zoom", &[key(CMD, Key::Num0)]),
+    (
+        Command::RotateCounterClockwise,
+        "Rotate page counter-clockwise",
+        &[key(CMD_SHIFT, Key::R)],
+    ),
+    (
+        Command::RotateClockwise,
+        "Rotate page clockwise",
+        &[key(CMD, Key::R)],
+    ),
     (Command::ToggleDark, "Toggle dark mode", &[key(CMD, Key::D)]),
 ];
 

@@ -1,8 +1,10 @@
-//! Freehand annotations, stored outside the PDF in the user's data directory.
+//! Freehand annotations and page rotations, stored outside the PDF in the user's data
+//! directory.
 //!
 //! Each PDF gets one JSON file named after the BLAKE3 hash of its bytes, so
 //! annotations follow the document even if it is renamed or moved.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +22,9 @@ pub struct Stroke {
 #[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Annotations {
     pub strokes: Vec<Stroke>,
+    /// Clockwise quarter turns, for pages that have any.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub turns: BTreeMap<usize, u8>,
 }
 
 pub fn key(pdf_bytes: &[u8]) -> String {
@@ -61,9 +66,9 @@ impl Annotations {
     }
 
     /// Writes to a temp file and renames it, so a crash never leaves a half-written file.
-    /// With no strokes left the file is removed instead, so only annotated PDFs have one.
+    /// With nothing left the file is removed instead, so only annotated PDFs have one.
     fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if self.strokes.is_empty() {
+        if self.strokes.is_empty() && self.turns.is_empty() {
             return match std::fs::remove_file(path) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
                 _ => Ok(()),
@@ -75,6 +80,17 @@ impl Annotations {
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, serde_json::to_vec(self)?)?;
         std::fs::rename(&tmp, path)
+    }
+
+    pub fn turns(&self, page: usize) -> u8 {
+        self.turns.get(&page).copied().unwrap_or(0)
+    }
+
+    pub fn rotate(&mut self, page: usize, quarter_turns: u8) {
+        match (self.turns(page) + quarter_turns) % 4 {
+            0 => self.turns.remove(&page),
+            turns => self.turns.insert(page, turns),
+        };
     }
 
     /// Index of the topmost stroke on `page` within `radius` of the line from `from` to `to`.
@@ -145,6 +161,7 @@ mod tests {
                 stroke(4, &[[10.0, 10.0], [100.0, 10.0]]),
                 stroke(0, &[[5.0, 5.0]]),
             ],
+            ..Annotations::default()
         };
         let path = temp_path("round-trip");
         annots.save_to(&path).unwrap();
@@ -158,6 +175,7 @@ mod tests {
         let path = temp_path("emptied");
         let mut annots = Annotations {
             strokes: vec![stroke(0, &[[1.0, 1.0], [2.0, 2.0]])],
+            ..Annotations::default()
         };
         annots.save_to(&path).unwrap();
         assert!(path.exists());
@@ -166,6 +184,33 @@ mod tests {
         annots.save_to(&path).unwrap();
         assert!(!path.exists());
         annots.save_to(&path).unwrap(); // already gone is fine
+    }
+
+    #[test]
+    fn rotations_round_trip_and_alone_keep_the_file() {
+        let path = temp_path("rotated");
+        let mut annots = Annotations::default();
+        annots.rotate(2, 1);
+        annots.rotate(5, 3);
+        annots.save_to(&path).unwrap();
+        assert_eq!(Annotations::load_from(&path).unwrap(), annots);
+
+        annots.rotate(2, 3);
+        annots.rotate(5, 1);
+        assert!(annots.turns.is_empty(), "full turns are dropped");
+        annots.save_to(&path).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn files_from_before_rotation_still_load() {
+        let path = temp_path("old-format");
+        std::fs::write(&path, r#"{"strokes":[]}"#).unwrap();
+        assert_eq!(
+            Annotations::load_from(&path).unwrap(),
+            Annotations::default()
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
@@ -194,6 +239,7 @@ mod tests {
     fn hit_finds_strokes_near_the_pointer() {
         let annots = Annotations {
             strokes: vec![stroke(4, &[[10.0, 10.0], [100.0, 10.0]])],
+            ..Annotations::default()
         };
         let at = |p| annots.hit(4, p, p, 2.0);
         assert_eq!(at([50.0, 12.0]), Some(0));
@@ -211,6 +257,7 @@ mod tests {
         let line = [[0.0, 0.0], [100.0, 0.0]];
         let annots = Annotations {
             strokes: vec![stroke(0, &line), stroke(0, &line)],
+            ..Annotations::default()
         };
         assert_eq!(annots.hit(0, [50.0, 0.0], [50.0, 0.0], 1.0), Some(1));
     }
@@ -219,6 +266,7 @@ mod tests {
     fn hit_finds_single_point_strokes() {
         let annots = Annotations {
             strokes: vec![stroke(0, &[[20.0, 20.0]])],
+            ..Annotations::default()
         };
         assert_eq!(annots.hit(0, [21.0, 21.0], [21.0, 21.0], 2.0), Some(0));
         assert_eq!(annots.hit(0, [40.0, 40.0], [40.0, 40.0], 2.0), None);
@@ -233,6 +281,7 @@ mod tests {
     fn hit_finds_strokes_the_eraser_swept_across() {
         let annots = Annotations {
             strokes: vec![stroke(0, &[[50.0, 0.0], [50.0, 100.0]])],
+            ..Annotations::default()
         };
         // Both ends are far from the stroke, but the path between them crosses it.
         assert_eq!(annots.hit(0, [0.0, 50.0], [100.0, 50.0], 2.0), Some(0));

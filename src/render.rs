@@ -16,6 +16,8 @@ pub struct Job {
     /// Pixels per PDF point.
     pub scale: f32,
     pub invert: bool,
+    /// Clockwise quarter turns.
+    pub turns: u8,
 }
 
 /// One search match: the rectangles it covers (several if it wraps onto the next line),
@@ -156,6 +158,7 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
                             page: 0,
                             scale: 1.0,
                             invert: false,
+                            turns: 0,
                         });
                     }
                     Err(e) => send(Reply::Failed(e)),
@@ -247,7 +250,8 @@ fn open(path: &Path) -> Result<(Document, String, Vec<egui::Vec2>), String> {
 
 fn render(doc: &Document, job: Job) -> Result<ColorImage, mupdf::Error> {
     let page = doc.load_page(job.page as i32)?;
-    let matrix = Matrix::new_scale(job.scale, job.scale);
+    let mut matrix = Matrix::new_rotate(90.0 * f32::from(job.turns));
+    matrix.scale(job.scale, job.scale);
     let mut pixmap = page.to_pixmap(&matrix, &Colorspace::device_rgb(), false, false)?;
     if job.invert {
         pixmap.invert()?;
@@ -328,11 +332,38 @@ mod tests {
             page: 0,
             scale: 0.5,
             invert: false,
+            turns: 0,
         };
         let image = render(&doc, job).unwrap();
         assert_eq!(image.size, [306, 396]);
         assert_eq!(pixel(&image, 5, 5), [255, 255, 255]);
         assert_eq!(pixel(&image, 5, 390), [0, 0, 0]);
+    }
+
+    #[test]
+    fn turns_rotate_the_page_clockwise() {
+        let (doc, _, _) = open(&fixture()).unwrap();
+        let job = |turns| Job {
+            page: 0,
+            scale: 0.5,
+            invert: false,
+            turns,
+        };
+        let image = render(&doc, job(1)).unwrap();
+        assert_eq!(image.size, [396, 306]);
+        assert_eq!(
+            pixel(&image, 5, 5),
+            [0, 0, 0],
+            "bottom-left square is now top-left"
+        );
+        assert_eq!(pixel(&image, 390, 300), [255, 255, 255]);
+
+        let image = render(&doc, job(3)).unwrap();
+        assert_eq!(
+            pixel(&image, 390, 300),
+            [0, 0, 0],
+            "and bottom-right the other way"
+        );
     }
 
     #[test]
@@ -342,6 +373,7 @@ mod tests {
             page: 0,
             scale: 0.5,
             invert: true,
+            turns: 0,
         };
         let image = render(&doc, job).unwrap();
         assert_eq!(pixel(&image, 5, 5), [0, 0, 0]);
@@ -366,6 +398,7 @@ mod tests {
             page: 1,
             scale: 1.0,
             invert: false,
+            turns: 0,
         };
         renderer.want(generation, vec![wanted]);
         // The worker may still send its head-start render of page 1 first.
@@ -397,6 +430,7 @@ mod tests {
             page: 1,
             scale: 1.0,
             invert: false,
+            turns: 0,
         };
         renderer.want(generation, vec![wanted]);
         let mut failed = false;
@@ -473,6 +507,7 @@ mod tests {
             page: 1,
             scale: 0.25,
             invert: false,
+            turns: 0,
         };
         renderer.want(1, vec![stale]);
 
