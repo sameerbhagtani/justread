@@ -4,8 +4,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, Align2, Id, Key, Modifiers, Rect, Sense, Shape, Stroke, TextEdit, vec2};
+use eframe::egui::{self, Align2, Id, Key, Modifiers, Rect, Sense, Shape, Stroke, vec2};
 
+use crate::dialogs;
 use crate::render::Hit;
 
 /// How long typing must pause before a search starts, so each keystroke doesn't start one.
@@ -25,7 +26,6 @@ pub struct Find {
     query: String,
     /// Bumped for every search, so matches still arriving from an older one are dropped.
     pub id: u64,
-    /// When to start searching for the current query.
     search_at: Option<Instant>,
     hits: BTreeMap<usize, Vec<Hit>>,
     done: bool,
@@ -52,7 +52,6 @@ impl Find {
         self.reset()
     }
 
-    /// For a newly opened document: drops the old matches and searches it again.
     pub fn restart(&mut self) {
         self.reset();
         if self.open {
@@ -148,9 +147,8 @@ impl Find {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> Event {
-        // Handled before the text box sees them: it would give up focus on Enter, and move
-        // the cursor to the start or end on the arrows. Esc is handled by the app, since egui
-        // unfocuses the box on Esc before we'd see it here.
+        // Taken before the text box sees them. Esc is handled by the app: egui unfocuses
+        // the box on Esc before this runs.
         let mut event = Event::None;
         if ctx.memory(|m| m.has_focus(Self::input_id())) {
             ctx.input_mut(|i| {
@@ -169,12 +167,12 @@ impl Find {
         egui::Area::new(Id::unique("find"))
             .anchor(Align2::RIGHT_TOP, vec2(-12.0, 12.0))
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                dialogs::box_frame(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                         let input = ui.add(
-                            TextEdit::singleline(&mut self.query)
+                            dialogs::input(&mut self.query, "Find")
                                 .id(Self::input_id())
-                                .hint_text("Find")
                                 .desired_width(200.0),
                         );
                         if std::mem::take(&mut self.focus) {
@@ -184,13 +182,15 @@ impl Find {
                             self.search_at = Some(Instant::now() + DELAY);
                         }
                         ui.weak(self.status());
-                        if icon_button(ui, Icon::Up, "Previous (Shift+Enter or Up)") {
+                        ui.add_space(8.0);
+                        let size = input.rect.height();
+                        if icon_button(ui, size, Icon::Up, "Previous (Shift+Enter or Up)") {
                             event = self.step(false);
                         }
-                        if icon_button(ui, Icon::Down, "Next (Enter or Down)") {
+                        if icon_button(ui, size, Icon::Down, "Next (Enter or Down)") {
                             event = self.step(true);
                         }
-                        if icon_button(ui, Icon::Close, "Close (Esc)") {
+                        if icon_button(ui, size, Icon::Close, "Close (Esc)") {
                             event = Event::Close;
                         }
                     });
@@ -210,10 +210,8 @@ enum Icon {
     Close,
 }
 
-/// Drawn rather than typed: egui's bundled fonts only have arrow and cross glyphs with its
-/// emoji fonts enabled, which would add about 1 MB to the binary.
-fn icon_button(ui: &mut egui::Ui, icon: Icon, hint: &str) -> bool {
-    let size = ui.spacing().interact_size.y;
+/// Drawn, since egui's fonts lack these glyphs without its ~1 MB emoji fonts.
+fn icon_button(ui: &mut egui::Ui, size: f32, icon: Icon, hint: &str) -> bool {
     let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     let response = response.on_hover_text(hint);
     let visuals = ui.style().interact(&response);
@@ -221,7 +219,7 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, hint: &str) -> bool {
     if response.hovered() {
         painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
     }
-    let (c, r) = (rect.center(), size * 0.2);
+    let (c, r) = (rect.center(), size * 0.15);
     let stroke = Stroke::new(1.5, visuals.fg_stroke.color);
     match icon {
         Icon::Up => painter.add(Shape::line(

@@ -117,6 +117,7 @@ impl App {
             .and_then(|s| eframe::get_value(s, "dark"))
             .unwrap_or(ctx.system_theme() == Some(Theme::Dark));
         ctx.set_theme(theme(dark));
+        crate::dialogs::set_flat_style(ctx);
         Self {
             renderer,
             doc: None,
