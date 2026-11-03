@@ -57,7 +57,14 @@ impl Annotations {
     }
 
     /// Writes to a temp file and renames it, so a crash never leaves a half-written file.
+    /// With no strokes left the file is removed instead, so only annotated PDFs have one.
     fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if self.strokes.is_empty() {
+            return match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -122,6 +129,21 @@ mod tests {
         assert_eq!(Annotations::load_from(&path), annots);
         assert!(!path.with_extension("json.tmp").exists());
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn removing_every_stroke_deletes_the_file() {
+        let path = temp_path("emptied");
+        let mut annots = Annotations {
+            strokes: vec![stroke(0, &[[1.0, 1.0], [2.0, 2.0]])],
+        };
+        annots.save_to(&path).unwrap();
+        assert!(path.exists());
+
+        annots.strokes.clear();
+        annots.save_to(&path).unwrap();
+        assert!(!path.exists());
+        annots.save_to(&path).unwrap(); // already gone is fine
     }
 
     #[test]
