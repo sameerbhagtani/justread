@@ -9,7 +9,7 @@ use eframe::egui::{
 
 use crate::annot::{Annotations, Stroke};
 use crate::commands::{self, Command};
-use crate::palette::{GoTo, Outcome, Palette};
+use crate::dialogs::{GoTo, Outcome, Palette};
 use crate::render::{Job, Renderer, Reply};
 
 const PAGE_GAP: f32 = 12.0;
@@ -17,6 +17,7 @@ const ZOOM_STEP: f32 = 1.25;
 const ZOOM_RANGE: (f32, f32) = (0.25, 5.0);
 /// How long the zoom must stay put before pages are re-rendered at the new scale.
 const ZOOM_SETTLE: Duration = Duration::from_millis(150);
+const ERROR_DURATION: Duration = Duration::from_secs(5);
 /// Largest texture side we ask for, even if the GPU allows more: past this a single page
 /// costs hundreds of MB.
 const MAX_TEXTURE_SIDE: f32 = 8192.0;
@@ -45,8 +46,9 @@ struct OpenDoc {
     sizes: Vec<Vec2>,
     textures: HashMap<usize, (Job, TextureHandle)>,
     annots: Annotations,
-    /// False if its annotations file couldn't be read, since saving would overwrite it.
-    writable: bool,
+    /// Why its annotations file couldn't be read. Nothing is saved then, since that would
+    /// overwrite the file.
+    load_error: Option<String>,
     history: Vec<Edit>,
     drawing: Option<Stroke>,
     /// Last eraser position, so a fast swipe erases everything along its path.
@@ -62,7 +64,8 @@ pub struct App {
     tool: Tool,
     palette: Option<Palette>,
     goto: Option<GoTo>,
-    error: Option<String>,
+    /// Shown until `ERROR_DURATION` after the given time.
+    error: Option<(String, Instant)>,
     scroll_to: Option<usize>,
     scroll_offset: Option<Vec2>,
     /// When the zoom last changed. Cleared once it settles.
@@ -187,11 +190,15 @@ impl App {
 
     fn save(&mut self) {
         if let Some(doc) = &self.doc
-            && doc.writable
+            && doc.load_error.is_none()
             && let Err(e) = doc.annots.save(&doc.key)
         {
-            self.error = Some(format!("Could not save annotations: {e}"));
+            self.show_error(format!("Could not save annotations: {e}"));
         }
+    }
+
+    fn show_error(&mut self, error: String) {
+        self.error = Some((error, Instant::now()));
     }
 
     fn poll_renderer(&mut self, ctx: &egui::Context) {
@@ -203,7 +210,7 @@ impl App {
                     key,
                     sizes,
                 } => self.opened(ctx, generation, path, key, sizes),
-                Reply::Failed(e) => self.error = Some(e),
+                Reply::Failed(e) => self.show_error(e),
                 Reply::Page(job, image) => {
                     let Some(doc) = &mut self.doc else { continue };
                     let texture = ctx.load_texture(
@@ -212,12 +219,6 @@ impl App {
                         TextureOptions::LINEAR,
                     );
                     doc.textures.insert(job.page, (job, texture));
-                    if let Some(start) = self.bench.take() {
-                        println!(
-                            "first page ready in {:.1} ms",
-                            start.elapsed().as_secs_f64() * 1000.0
-                        );
-                    }
                 }
             }
         }
@@ -236,19 +237,19 @@ impl App {
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("{name} - justread")));
         self.error = None;
-        let (annots, writable) = match Annotations::load(&key) {
-            Ok(annots) => (annots, true),
-            Err(e) => {
-                self.error = Some(format!(
+        let (annots, load_error) = match Annotations::load(&key) {
+            Ok(annots) => (annots, None),
+            Err(e) => (
+                Annotations::default(),
+                Some(format!(
                     "Could not read annotations, new ones won't be saved: {e}"
-                ));
-                (Annotations::default(), false)
-            }
+                )),
+            ),
         };
         self.doc = Some(OpenDoc {
             generation,
             annots,
-            writable,
+            load_error,
             key,
             sizes,
             textures: HashMap::new(),
@@ -338,8 +339,20 @@ impl App {
                     scale,
                     invert: self.dark,
                 };
-                if needs_render(doc.textures.get(&i).map(|(j, _)| *j), job, zooming) {
+                let have = doc.textures.get(&i).map(|(j, _)| *j);
+                if needs_render(have, job, zooming) {
                     wanted.push(job);
+                }
+                // Not just any texture: the worker's head start can be at the wrong scale
+                // or colors.
+                if i == first
+                    && have == Some(job)
+                    && let Some(start) = self.bench.take()
+                {
+                    println!(
+                        "first page shown in {:.1} ms",
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
             }
             doc.textures.retain(|&i, _| i + 3 >= first && i <= last + 3);
@@ -419,7 +432,12 @@ impl App {
                 ui.visuals().weak_text_color(),
             );
         }
-        if let Some(error) = &self.error {
+        let error = self
+            .error
+            .as_ref()
+            .map(|(e, _)| e)
+            .or(self.doc.as_ref().and_then(|d| d.load_error.as_ref()));
+        if let Some(error) = error {
             painter.text(
                 rect.left_bottom(),
                 Align2::LEFT_BOTTOM,
@@ -605,6 +623,15 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll_renderer(&ctx);
+
+        if let Some((_, shown_at)) = self.error {
+            let left = ERROR_DURATION.saturating_sub(shown_at.elapsed());
+            if left.is_zero() {
+                self.error = None;
+            } else {
+                ctx.request_repaint_after(left);
+            }
+        }
 
         if let Some(path) =
             ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()))

@@ -3,7 +3,7 @@
 mod annot;
 mod app;
 mod commands;
-mod palette;
+mod dialogs;
 mod render;
 
 use std::path::PathBuf;

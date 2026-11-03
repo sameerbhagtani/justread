@@ -16,13 +16,17 @@ jobs:
                       formats: --formats deb,appimage
 
                     - os: windows-latest
+                      formats: --formats nsis
 
         runs-on: ${{ matrix.os }}
 
         steps:
             - uses: actions/checkout@v7
 
-            - uses: dtolnay/rust-toolchain@stable
+            # Rust comes from mise.toml, so CI builds with the same version as local builds.
+            - uses: jdx/mise-action@v5
+              with:
+                  install_args: rust
 
             - uses: Swatinem/rust-cache@v2
 
