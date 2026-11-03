@@ -89,6 +89,8 @@ impl OpenDoc {
 pub struct App {
     renderer: Renderer,
     doc: Option<OpenDoc>,
+    /// Always starts light and isn't remembered: inverted pages look bad on photos, so
+    /// dark mode is opt-in per session.
     dark: bool,
     zoom: f32,
     tool: Tool,
@@ -121,16 +123,12 @@ impl App {
         let _ = renderer.ctx.set(ctx.clone());
         // Ctrl +/-/0 zoom the PDF, not egui's whole UI.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let dark = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, "dark"))
-            .unwrap_or(ctx.system_theme() == Some(Theme::Dark));
-        ctx.set_theme(theme(dark));
+        ctx.set_theme(Theme::Light);
         crate::dialogs::set_flat_style(ctx);
         Self {
             renderer,
             doc: None,
-            dark,
+            dark: false,
             zoom: 1.0,
             tool: Tool::Hand,
             palette: None,
@@ -819,6 +817,14 @@ fn paint_stroke(painter: &egui::Painter, stroke: &Stroke, placed: Placed) {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // egui sets the title bar's theme during the first frame, while eframe still keeps
+        // the window hidden, so Windows ignores it until focus changes. Again once visible.
+        #[cfg(windows)]
+        match ctx.cumulative_pass_nr() {
+            0 => ctx.request_repaint(),
+            1 => ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Light)),
+            _ => {}
+        }
         self.poll_renderer(&ctx);
 
         if let Some((_, shown_at)) = self.error {
@@ -888,10 +894,6 @@ impl eframe::App for App {
                 self.renderer.find(doc.generation, id, query, doc.current);
             }
         }
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, "dark", &self.dark);
     }
 }
 
