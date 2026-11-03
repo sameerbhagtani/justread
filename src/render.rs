@@ -238,21 +238,33 @@ fn open(path: &Path) -> Result<(Document, String, Vec<egui::Vec2>), String> {
         return Err("Password-protected PDFs are not supported".into());
     }
     let count = doc.page_count().map_err(|e| e.to_string())?;
-    let sizes = (0..count)
-        .map(|i| {
-            let b = doc.load_page(i)?.bounds()?;
-            Ok(egui::vec2(b.width(), b.height()))
-        })
-        .collect::<Result<_, mupdf::Error>>()
-        .map_err(|e| e.to_string())?;
+    let sizes = page_sizes(count as usize, |i| {
+        let b = doc.load_page(i as i32)?.bounds()?;
+        Ok(egui::vec2(b.width(), b.height()))
+    });
     Ok((doc, crate::annot::key(&bytes), sizes))
+}
+
+/// A page whose size can't be read takes the previous page's (or Letter's, if it's the
+/// first), so one broken page doesn't stop the rest from opening. It shows its error
+/// when rendered.
+fn page_sizes(
+    count: usize,
+    size: impl Fn(usize) -> Result<egui::Vec2, mupdf::Error>,
+) -> Vec<egui::Vec2> {
+    let mut sizes: Vec<egui::Vec2> = Vec::with_capacity(count);
+    for i in 0..count {
+        let fallback = sizes.last().copied().unwrap_or(egui::vec2(612.0, 792.0));
+        sizes.push(size(i).unwrap_or(fallback));
+    }
+    sizes
 }
 
 fn render(doc: &Document, job: Job) -> Result<ColorImage, mupdf::Error> {
     let page = doc.load_page(job.page as i32)?;
     let mut matrix = Matrix::new_rotate(90.0 * f32::from(job.turns));
     matrix.scale(job.scale, job.scale);
-    let mut pixmap = page.to_pixmap(&matrix, &Colorspace::device_rgb(), false, false)?;
+    let mut pixmap = page.to_pixmap(&matrix, &Colorspace::device_rgb(), false, true)?;
     if job.invert {
         pixmap.invert()?;
     }
@@ -316,6 +328,33 @@ mod tests {
             vec![egui::vec2(612.0, 792.0), egui::vec2(300.0, 400.0)]
         );
         assert_eq!(key, crate::annot::key(&std::fs::read(fixture()).unwrap()));
+    }
+
+    /// A blank 200x200 page with a black square annotation (no content stream) in its
+    /// bottom-left 100x100.
+    #[test]
+    fn renders_annotations_stored_in_the_pdf() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/annotated.pdf");
+        let (doc, _, _) = open(&path).unwrap();
+        let job = Job {
+            page: 0,
+            scale: 1.0,
+            invert: false,
+            turns: 0,
+        };
+        let image = render(&doc, job).unwrap();
+        assert_eq!(pixel(&image, 50, 150), [0, 0, 0]);
+        assert_eq!(pixel(&image, 150, 50), [255, 255, 255]);
+    }
+
+    #[test]
+    fn unreadable_pages_borrow_the_previous_size() {
+        let a4 = egui::vec2(595.0, 842.0);
+        let sizes = page_sizes(4, |i| match i {
+            1 => Ok(a4),
+            _ => Err(mupdf::Error::InvalidUtf8),
+        });
+        assert_eq!(sizes, vec![egui::vec2(612.0, 792.0), a4, a4, a4]);
     }
 
     #[test]
