@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use eframe::egui::{
     self, Align2, Color32, CursorIcon, FontId, Pos2, Rect, ScrollArea, Sense, Shape, TextureHandle,
@@ -15,6 +15,8 @@ use crate::render::{Job, Renderer, Reply};
 const PAGE_GAP: f32 = 12.0;
 const ZOOM_STEP: f32 = 1.25;
 const ZOOM_RANGE: (f32, f32) = (0.25, 5.0);
+/// How long the zoom must stay put before pages are re-rendered at the new scale.
+const ZOOM_SETTLE: Duration = Duration::from_millis(150);
 /// Largest texture side we ask for, even if the GPU allows more: past this a single page
 /// costs hundreds of MB.
 const MAX_TEXTURE_SIDE: f32 = 8192.0;
@@ -60,6 +62,8 @@ pub struct App {
     error: Option<String>,
     scroll_to: Option<usize>,
     scroll_offset: Option<Vec2>,
+    /// When the zoom last changed, while it's still settling.
+    zoomed_at: Option<Instant>,
     /// Last frame's scroll offset and visible rect, for zooming around the cursor.
     view: Option<(Vec2, Rect)>,
     /// Last list sent to the worker, so we only send again when it changes.
@@ -94,6 +98,7 @@ impl App {
             error: None,
             scroll_to: None,
             scroll_offset: None,
+            zoomed_at: None,
             view: None,
             wanted: Vec::new(),
             bench,
@@ -147,6 +152,10 @@ impl App {
     /// Zooms keeping the content under `anchor` (default: the middle of the view) in place.
     fn zoom_at(&mut self, zoom: f32, anchor: Option<Pos2>) {
         let zoom = zoom.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1);
+        if zoom == self.zoom {
+            return;
+        }
+        self.zoomed_at = Some(Instant::now());
         if let (Some(doc), Some((offset, inner))) = (&self.doc, self.view) {
             let cursor = anchor.unwrap_or(inner.center()) - inner.min;
             let zooms = (self.zoom, zoom);
@@ -256,6 +265,15 @@ impl App {
         let (tops, content) = layout(&doc.sizes, zoom);
         let pixels_per_point = ui.ctx().pixels_per_point();
         let max_side = MAX_TEXTURE_SIDE.min(ui.input(|i| i.max_texture_side) as f32);
+        let settle_left = self
+            .zoomed_at
+            .map(|t| ZOOM_SETTLE.saturating_sub(t.elapsed()))
+            .filter(|left| !left.is_zero());
+        match settle_left {
+            Some(left) => ui.ctx().request_repaint_after(left),
+            None => self.zoomed_at = None,
+        }
+        let zooming = settle_left.is_some();
         let mut area = ScrollArea::both().auto_shrink(false);
         let scroll_offset = self.scroll_offset.take();
         if let Some(page) = self.scroll_to.take().filter(|&p| p < tops.len()) {
@@ -302,7 +320,7 @@ impl App {
                     scale,
                     invert: self.dark,
                 };
-                if doc.textures.get(&i).map(|(j, _)| *j) != Some(job) {
+                if needs_render(doc.textures.get(&i).map(|(j, _)| *j), job, zooming) {
                     wanted.push(job);
                 }
             }
@@ -445,6 +463,16 @@ fn current_page(tops: &[f32], viewport: Rect, content_height: f32) -> usize {
     tops.iter()
         .rposition(|&top| top <= viewport.min.y + viewport.height() / 3.0)
         .unwrap_or(0)
+}
+
+/// While zooming, every frame has a new scale, and renders can't be cancelled once started.
+/// So pages that already have a texture keep showing it, stretched, until the zoom settles.
+fn needs_render(have: Option<Job>, want: Job, zooming: bool) -> bool {
+    match have {
+        None => true,
+        Some(have) if have.invert != want.invert => true,
+        Some(have) => !zooming && have != want,
+    }
 }
 
 /// Returns true if a stroke was added.
@@ -649,6 +677,24 @@ mod tests {
         assert_zoom_keeps_spot(&sizes, 1200.0, (1.0, 1.5));
         assert_zoom_keeps_spot(&sizes, 1200.0, (1.0, 3.0));
         assert_zoom_keeps_spot(&sizes, 1200.0, (3.0, 1.0));
+    }
+
+    #[test]
+    fn zooming_reuses_stretched_textures_until_it_settles() {
+        let job = |scale, invert| Job {
+            page: 0,
+            scale,
+            invert,
+        };
+        let want = job(2.0, false);
+        assert!(needs_render(None, want, true), "nothing to stretch");
+        assert!(
+            needs_render(Some(job(2.0, true)), want, true),
+            "wrong colors"
+        );
+        assert!(!needs_render(Some(job(1.0, false)), want, true));
+        assert!(needs_render(Some(job(1.0, false)), want, false));
+        assert!(!needs_render(Some(want), want, false));
     }
 
     #[test]
