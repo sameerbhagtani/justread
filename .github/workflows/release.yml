@@ -84,3 +84,5 @@ jobs:
               with:
                   files: dist/*
                   generate_release_notes: true
+                  # Tags like v0.2.0-rc1 are trial runs, so they don't become "Latest".
+                  prerelease: ${{ contains(github.ref_name, '-') }}
