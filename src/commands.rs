@@ -13,6 +13,7 @@ pub enum Command {
     TogglePen,
     ToggleEraser,
     Undo,
+    Redo,
     ZoomIn,
     ZoomOut,
     ZoomReset,
@@ -51,6 +52,13 @@ pub const COMMANDS: &[(Command, &str, &[KeyboardShortcut])] = &[
     (Command::GoToPage, "Go to page…", &[key(CMD, Key::G)]),
     (Command::TogglePen, "Toggle pen", &[key(NONE, Key::P)]),
     (Command::ToggleEraser, "Toggle eraser", &[key(NONE, Key::E)]),
+    // Before Undo: egui ignores extra Shift when matching, so Undo's Ctrl+Z would also
+    // catch Ctrl+Shift+Z.
+    (
+        Command::Redo,
+        "Redo annotation",
+        &[key(CMD_SHIFT, Key::Z), key(CMD, Key::Y)],
+    ),
     (Command::Undo, "Undo annotation", &[key(CMD, Key::Z)]),
     (
         Command::ZoomIn,
@@ -83,6 +91,21 @@ mod tests {
             for (other, other_name, _) in &COMMANDS[i + 1..] {
                 assert_ne!(cmd, other, "{cmd:?} is listed twice");
                 assert_ne!(name, other_name, "two commands are named {name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_shortcut_is_caught_by_an_earlier_one() {
+        let all: Vec<_> = COMMANDS
+            .iter()
+            .flat_map(|(cmd, _, keys)| keys.iter().map(move |k| (cmd, k)))
+            .collect();
+        for (i, (cmd, key)) in all.iter().enumerate() {
+            for (earlier, earlier_key) in &all[..i] {
+                let caught = earlier_key.logical_key == key.logical_key
+                    && key.modifiers.matches_logically(earlier_key.modifiers);
+                assert!(!caught, "{cmd:?}'s shortcut also triggers {earlier:?}");
             }
         }
     }

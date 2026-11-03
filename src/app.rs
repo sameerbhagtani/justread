@@ -39,6 +39,12 @@ enum Edit {
     Erased(usize, Stroke),
 }
 
+/// An undone edit, holding what's needed to apply it again.
+enum Undone {
+    Added(Stroke),
+    Erased(usize),
+}
+
 struct OpenDoc {
     generation: u64,
     key: String,
@@ -50,6 +56,7 @@ struct OpenDoc {
     /// overwrite the file.
     load_error: Option<String>,
     history: Vec<Edit>,
+    redo: Vec<Undone>,
     drawing: Option<Stroke>,
     /// Last eraser position, so a fast swipe erases everything along its path.
     erasing: Option<(usize, [f32; 2])>,
@@ -57,6 +64,14 @@ struct OpenDoc {
     /// stroke an eraser drag removes.
     unsaved: bool,
     current: usize,
+}
+
+impl OpenDoc {
+    /// A new edit makes the undone ones meaningless, so it clears what redo would apply.
+    fn record(&mut self, edit: Edit) {
+        self.history.push(edit);
+        self.redo.clear();
+    }
 }
 
 pub struct App {
@@ -144,6 +159,7 @@ impl App {
             Command::TogglePen => self.toggle_tool(Tool::Pen),
             Command::ToggleEraser => self.toggle_tool(Tool::Eraser),
             Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
             Command::ZoomIn => self.zoom_at(self.zoom * ZOOM_STEP, None),
             Command::ZoomOut => self.zoom_at(self.zoom / ZOOM_STEP, None),
             Command::ZoomReset => self.zoom_at(1.0, None),
@@ -181,13 +197,32 @@ impl App {
 
     fn undo(&mut self) {
         let Some(doc) = &mut self.doc else { return };
-        match doc.history.pop() {
-            Some(Edit::Added) => {
-                doc.annots.strokes.pop();
+        let undone = match doc.history.pop() {
+            Some(Edit::Added) => match doc.annots.strokes.pop() {
+                Some(stroke) => Undone::Added(stroke),
+                None => return,
+            },
+            Some(Edit::Erased(idx, stroke)) => {
+                doc.annots.strokes.insert(idx, stroke);
+                Undone::Erased(idx)
             }
-            Some(Edit::Erased(idx, stroke)) => doc.annots.strokes.insert(idx, stroke),
             None => return,
-        }
+        };
+        doc.redo.push(undone);
+        self.save();
+    }
+
+    fn redo(&mut self) {
+        let Some(doc) = &mut self.doc else { return };
+        let edit = match doc.redo.pop() {
+            Some(Undone::Added(stroke)) => {
+                doc.annots.strokes.push(stroke);
+                Edit::Added
+            }
+            Some(Undone::Erased(idx)) => Edit::Erased(idx, doc.annots.strokes.remove(idx)),
+            None => return,
+        };
+        doc.history.push(edit);
         self.save();
     }
 
@@ -257,6 +292,7 @@ impl App {
             sizes,
             textures: HashMap::new(),
             history: Vec::new(),
+            redo: Vec::new(),
             drawing: None,
             erasing: None,
             unsaved: false,
@@ -524,7 +560,7 @@ fn finish_stroke(doc: &mut OpenDoc) -> bool {
         return false;
     };
     doc.annots.strokes.push(stroke);
-    doc.history.push(Edit::Added);
+    doc.record(Edit::Added);
     true
 }
 
@@ -594,7 +630,7 @@ fn page_input(
             let mut erased = false;
             while let Some(idx) = doc.annots.hit(page, from, to, ERASER_RADIUS / zoom) {
                 let stroke = doc.annots.strokes.remove(idx);
-                doc.history.push(Edit::Erased(idx, stroke));
+                doc.record(Edit::Erased(idx, stroke));
                 erased = true;
             }
             erased
