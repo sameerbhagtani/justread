@@ -363,12 +363,14 @@ impl App {
             None => self.zoomed_at = None,
         }
         let zooming = settle_left.is_some();
-        let mut area = ScrollArea::both().auto_shrink(false);
         let scroll_offset = self.scroll_offset.take();
-        if let Some(page) = self.scroll_to.take().filter(|&p| p < tops.len()) {
-            area = area.vertical_scroll_offset(tops[page] - PAGE_GAP);
-        } else if let Some(offset) = scroll_offset {
-            area = area.scroll_offset(offset);
+        let target = if let Some(page) = self.scroll_to.take().filter(|&p| p < tops.len()) {
+            Some(vec2(
+                self.view.map_or(0.0, |(o, _)| o.x),
+                tops[page] - PAGE_GAP,
+            ))
+        } else if scroll_offset.is_some() {
+            scroll_offset
         } else if let Some((page, hit)) = self.reveal.take().filter(|&(p, _)| p < tops.len())
             && let Some((offset, inner)) = self.view
         {
@@ -377,10 +379,16 @@ impl App {
                 pos2(left, tops[page]) + hit.min.to_vec2() * zoom,
                 hit.size() * zoom,
             );
-            let view = Rect::from_min_size(offset.to_pos2(), inner.size());
-            if let Some(offset) = reveal_offset(view, hit) {
-                area = area.scroll_offset(offset);
-            }
+            reveal_offset(Rect::from_min_size(offset.to_pos2(), inner.size()), hit)
+        } else {
+            None
+        };
+        let mut area = ScrollArea::both().auto_shrink(false);
+        if let Some(offset) = target {
+            // egui checks the offset against last frame's content size, so after zooming in
+            // it would treat it as overscroll and spring back.
+            ui.spacing_mut().scroll.kinetic.rubber_band = false;
+            area = area.scroll_offset(offset);
         }
 
         let mut wanted = Vec::new();
