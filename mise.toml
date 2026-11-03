@@ -11,3 +11,7 @@ description = "Run the tests, then build the Linux .deb and .AppImage into dist/
 # linuxdeploy's bundled strip is too old for Arch's libraries.
 env = { NO_STRIP = "true" }
 run = ["cargo test --release", "cargo packager --release --formats deb,appimage"]
+
+[tasks.icons]
+description = "Regenerate the PNG and .ico icons in assets/ from assets/icon.svg"
+run = "python3 scripts/icons.py"
