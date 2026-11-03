@@ -103,6 +103,9 @@ pub struct App {
     scroll_offset: Option<Vec2>,
     /// Trackpad scrolling taken out of egui's input, to apply without its smoothing.
     trackpad_scroll: Vec2,
+    /// TEMPORARY, for tuning on Windows: JUSTREAD_TRACKPAD_SPEED scales trackpad scrolling.
+    /// Remove once a value is chosen.
+    trackpad_speed: f32,
     /// A find match to scroll into view: page, and its rect in PDF points.
     reveal: Option<(usize, Rect)>,
     /// When the zoom last changed. Cleared once it settles.
@@ -142,6 +145,10 @@ impl App {
             scroll_to: None,
             scroll_offset: None,
             trackpad_scroll: Vec2::ZERO,
+            trackpad_speed: std::env::var("JUSTREAD_TRACKPAD_SPEED")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
             reveal: None,
             zoomed_at: None,
             view: None,
@@ -862,7 +869,7 @@ impl eframe::App for App {
             .retain(|event| match trackpad_scroll(event, line) {
                 Some(delta) => {
                     if !dialog_open {
-                        self.trackpad_scroll += delta;
+                        self.trackpad_scroll += delta * self.trackpad_speed;
                     }
                     false
                 }
