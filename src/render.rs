@@ -19,14 +19,14 @@ pub struct Job {
 
 enum Request {
     Open(PathBuf),
-    /// Replaces the list of pages the UI wants rendered, most important first. Tagged with
-    /// the document it was meant for: one sent just before an `Open` arrives after it.
+    /// Replaces the list of pages the UI wants rendered, most important first.
+    /// Ignored if its generation is from an earlier document.
     Want(u64, Vec<Job>),
 }
 
 pub enum Reply {
     Opened {
-        /// Counts successful opens, so each document gets a new one.
+        /// Goes up by one with each document opened.
         generation: u64,
         path: PathBuf,
         key: String,

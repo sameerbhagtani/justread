@@ -36,8 +36,7 @@ fn path_for(key: &str) -> Option<PathBuf> {
 }
 
 impl Annotations {
-    /// Fails if a file exists but can't be read or parsed. Callers must not save over it
-    /// then, or the strokes in it would be lost.
+    /// Errors if the file exists but can't be read, so callers know not to save over it.
     pub fn load(key: &str) -> std::io::Result<Self> {
         match path_for(key) {
             Some(p) => Self::load_from(&p)
@@ -78,8 +77,7 @@ impl Annotations {
         std::fs::rename(&tmp, path)
     }
 
-    /// Index of the topmost stroke on `page` passing within `radius` of the line from
-    /// `from` to `to`, the eraser's path since the last frame.
+    /// Index of the topmost stroke on `page` within `radius` of the line from `from` to `to`.
     pub fn hit(&self, page: usize, from: [f32; 2], to: [f32; 2], radius: f32) -> Option<usize> {
         self.strokes.iter().rposition(|s| {
             let near = |a, b| segment_distance(from, to, a, b) <= radius + s.width / 2.0;
@@ -97,15 +95,13 @@ fn segment_distance(p1: [f32; 2], p2: [f32; 2], q1: [f32; 2], q2: [f32; 2]) -> f
     if segments_cross(p1, p2, q1, q2) {
         return 0.0;
     }
-    // Otherwise the closest pair always includes an endpoint of one of them.
+    // Segments that don't cross are closest at an endpoint of one of them.
     dist_to_segment(p1, q1, q2)
         .min(dist_to_segment(p2, q1, q2))
         .min(dist_to_segment(q1, p1, p2))
         .min(dist_to_segment(q2, p1, p2))
 }
 
-/// True if the segments cross properly. Touching or overlapping ones aren't caught here,
-/// but they're at distance 0 from an endpoint, which `segment_distance` covers.
 fn segments_cross(p1: [f32; 2], p2: [f32; 2], q1: [f32; 2], q2: [f32; 2]) -> bool {
     let side = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| {
         (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])

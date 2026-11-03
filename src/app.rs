@@ -39,18 +39,17 @@ enum Edit {
 }
 
 struct OpenDoc {
-    /// The renderer's number for this document; page requests carry it.
     generation: u64,
     key: String,
     /// Page sizes in PDF points.
     sizes: Vec<Vec2>,
     textures: HashMap<usize, (Job, TextureHandle)>,
     annots: Annotations,
-    /// False when an existing annotations file couldn't be read, so saving would destroy it.
+    /// False if its annotations file couldn't be read, since saving would overwrite it.
     writable: bool,
     history: Vec<Edit>,
     drawing: Option<Stroke>,
-    /// The eraser's page and position last frame, so it sweeps the whole path between frames.
+    /// Last eraser position, so a fast swipe erases everything along its path.
     erasing: Option<(usize, [f32; 2])>,
     current: usize,
 }
@@ -66,7 +65,7 @@ pub struct App {
     error: Option<String>,
     scroll_to: Option<usize>,
     scroll_offset: Option<Vec2>,
-    /// When the zoom last changed, while it's still settling.
+    /// When the zoom last changed. Cleared once it settles.
     zoomed_at: Option<Instant>,
     /// Last frame's scroll offset and visible rect, for zooming around the cursor.
     view: Option<(Vec2, Rect)>,
@@ -485,8 +484,8 @@ fn current_page(tops: &[f32], viewport: Rect, content_height: f32) -> usize {
         .unwrap_or(0)
 }
 
-/// While zooming, every frame has a new scale, and renders can't be cancelled once started.
-/// So pages that already have a texture keep showing it, stretched, until the zoom settles.
+/// While zooming, pages that have a texture show it stretched instead of re-rendering at
+/// every in-between scale, since a render can't be cancelled once started.
 fn needs_render(have: Option<Job>, want: Job, zooming: bool) -> bool {
     match have {
         None => true,
