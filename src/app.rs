@@ -113,6 +113,8 @@ pub struct App {
     wanted: Vec<Job>,
     /// Set with `--bench-startup`: when `main` started.
     bench: Option<Instant>,
+    #[cfg(windows)]
+    title_bar_refreshed: bool,
 }
 
 impl App {
@@ -145,6 +147,8 @@ impl App {
             view: None,
             wanted: Vec::new(),
             bench,
+            #[cfg(windows)]
+            title_bar_refreshed: false,
         }
     }
 
@@ -868,13 +872,17 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        // egui sets the title bar's theme during the first frame, while eframe still keeps
-        // the window hidden, so Windows ignores it until focus changes. Again once visible.
+        // egui sets the title bar's theme while the window is still hidden and unfocused,
+        // and Windows only repaints the title bar on a focus change. Setting it again once
+        // focused makes egui-winit toggle the activation state, which repaints it.
         #[cfg(windows)]
-        match ctx.cumulative_pass_nr() {
-            0 => ctx.request_repaint(),
-            1 => ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Light)),
-            _ => {}
+        if !self.title_bar_refreshed && ctx.input(|i| i.focused) {
+            self.title_bar_refreshed = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if self.dark {
+                egui::SystemTheme::Dark
+            } else {
+                egui::SystemTheme::Light
+            }));
         }
         self.poll_renderer(&ctx);
 
