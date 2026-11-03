@@ -19,12 +19,15 @@ pub struct Job {
 
 enum Request {
     Open(PathBuf),
-    /// Replaces the list of pages the UI wants rendered, most important first.
-    Want(Vec<Job>),
+    /// Replaces the list of pages the UI wants rendered, most important first. Tagged with
+    /// the document it was meant for: one sent just before an `Open` arrives after it.
+    Want(u64, Vec<Job>),
 }
 
 pub enum Reply {
     Opened {
+        /// Counts successful opens, so each document gets a new one.
+        generation: u64,
         path: PathBuf,
         key: String,
         /// Page sizes in PDF points.
@@ -62,13 +65,14 @@ impl Renderer {
         }
     }
 
-    pub fn want(&self, jobs: Vec<Job>) {
-        let _ = self.tx.send(Request::Want(jobs));
+    pub fn want(&self, generation: u64, jobs: Vec<Job>) {
+        let _ = self.tx.send(Request::Want(generation, jobs));
     }
 }
 
 fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Context>>) {
     let mut doc: Option<Document> = None;
+    let mut generation = 0;
     let mut queue: VecDeque<Job> = VecDeque::new();
 
     let send = |reply: Reply| {
@@ -96,7 +100,13 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
                     Ok((d, key, sizes)) => {
                         queue.clear();
                         doc = Some(d);
-                        send(Reply::Opened { path, key, sizes });
+                        generation += 1;
+                        send(Reply::Opened {
+                            generation,
+                            path,
+                            key,
+                            sizes,
+                        });
                         // Head start while the UI is still starting: render page 1 at a guessed
                         // scale. Even if the guess is off, MuPDF's font/image caches are now warm.
                         queue.push_back(Job {
@@ -109,8 +119,10 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
                 }
                 continue;
             }
-            Some(Request::Want(jobs)) => {
-                queue = jobs.into();
+            Some(Request::Want(for_generation, jobs)) => {
+                if for_generation == generation {
+                    queue = jobs.into();
+                }
                 continue;
             }
             None if queue.is_empty() => return, // UI is gone
@@ -235,7 +247,10 @@ mod tests {
         let recv = || renderer.rx.recv_timeout(Duration::from_secs(10)).unwrap();
 
         renderer.open(fixture());
-        let Reply::Opened { sizes, .. } = recv() else {
+        let Reply::Opened {
+            generation, sizes, ..
+        } = recv()
+        else {
             panic!("expected Opened")
         };
         assert_eq!(sizes.len(), 2);
@@ -245,7 +260,7 @@ mod tests {
             scale: 1.0,
             invert: false,
         };
-        renderer.want(vec![wanted]);
+        renderer.want(generation, vec![wanted]);
         // The worker may still send its head-start render of page 1 first.
         loop {
             match recv() {
@@ -266,7 +281,9 @@ mod tests {
         let recv = || renderer.rx.recv_timeout(Duration::from_secs(10)).unwrap();
 
         renderer.open(fixture());
-        assert!(matches!(recv(), Reply::Opened { .. }));
+        let Reply::Opened { generation, .. } = recv() else {
+            panic!("expected Opened")
+        };
         renderer.open(PathBuf::from("notes.txt"));
 
         let wanted = Job {
@@ -274,7 +291,7 @@ mod tests {
             scale: 1.0,
             invert: false,
         };
-        renderer.want(vec![wanted]);
+        renderer.want(generation, vec![wanted]);
         let mut failed = false;
         loop {
             match recv() {
@@ -285,5 +302,30 @@ mod tests {
             }
         }
         assert!(failed, "the bad file should still report an error");
+    }
+
+    #[test]
+    fn requests_for_an_older_document_are_ignored() {
+        let renderer = Renderer::spawn();
+        renderer.open(fixture());
+        renderer.open(fixture());
+
+        // Meant for the first document, but it arrives after the second opened.
+        let stale = Job {
+            page: 1,
+            scale: 0.25,
+            invert: false,
+        };
+        renderer.want(1, vec![stale]);
+
+        let mut generations = Vec::new();
+        while let Ok(reply) = renderer.rx.recv_timeout(Duration::from_millis(500)) {
+            match reply {
+                Reply::Opened { generation, .. } => generations.push(generation),
+                Reply::Page(job, _) => assert_ne!(job, stale, "rendered a stale request"),
+                Reply::Failed(e) => panic!("{e}"),
+            }
+        }
+        assert_eq!(generations, vec![1, 2]);
     }
 }

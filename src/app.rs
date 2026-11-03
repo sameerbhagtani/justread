@@ -39,6 +39,8 @@ enum Edit {
 }
 
 struct OpenDoc {
+    /// The renderer's number for this document; page requests carry it.
+    generation: u64,
     key: String,
     /// Page sizes in PDF points.
     sizes: Vec<Vec2>,
@@ -48,6 +50,8 @@ struct OpenDoc {
     writable: bool,
     history: Vec<Edit>,
     drawing: Option<Stroke>,
+    /// The eraser's page and position last frame, so it sweeps the whole path between frames.
+    erasing: Option<(usize, [f32; 2])>,
     current: usize,
 }
 
@@ -194,7 +198,12 @@ impl App {
     fn poll_renderer(&mut self, ctx: &egui::Context) {
         while let Ok(reply) = self.renderer.rx.try_recv() {
             match reply {
-                Reply::Opened { path, key, sizes } => self.opened(ctx, path, key, sizes),
+                Reply::Opened {
+                    generation,
+                    path,
+                    key,
+                    sizes,
+                } => self.opened(ctx, generation, path, key, sizes),
                 Reply::Failed(e) => self.error = Some(e),
                 Reply::Page(job, image) => {
                     let Some(doc) = &mut self.doc else { continue };
@@ -215,7 +224,14 @@ impl App {
         }
     }
 
-    fn opened(&mut self, ctx: &egui::Context, path: PathBuf, key: String, sizes: Vec<Vec2>) {
+    fn opened(
+        &mut self,
+        ctx: &egui::Context,
+        generation: u64,
+        path: PathBuf,
+        key: String,
+        sizes: Vec<Vec2>,
+    ) {
         let name = path
             .file_name()
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -231,6 +247,7 @@ impl App {
             }
         };
         self.doc = Some(OpenDoc {
+            generation,
             annots,
             writable,
             key,
@@ -238,6 +255,7 @@ impl App {
             textures: HashMap::new(),
             history: Vec::new(),
             drawing: None,
+            erasing: None,
             current: 0,
         });
         self.wanted.clear();
@@ -262,6 +280,7 @@ impl App {
         };
 
         let zoom = self.zoom;
+        let generation = doc.generation;
         let (tops, content) = layout(&doc.sizes, zoom);
         let pixels_per_point = ui.ctx().pixels_per_point();
         let max_side = MAX_TEXTURE_SIDE.min(ui.input(|i| i.max_texture_side) as f32);
@@ -365,15 +384,16 @@ impl App {
 
         // The release can happen where page_input doesn't see it: after switching tools
         // mid-stroke, or with the page scrolled out of view.
-        if doc.drawing.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+        if !ui.input(|i| i.pointer.primary_down()) {
             changed |= finish_stroke(doc);
+            doc.erasing = None;
         }
 
         if changed {
             self.save();
         }
         if wanted != self.wanted {
-            self.renderer.want(wanted.clone());
+            self.renderer.want(generation, wanted.clone());
             self.wanted = wanted;
         }
     }
@@ -542,12 +562,19 @@ fn page_input(
             let Some(pos) = response.interact_pointer_pos() else {
                 return false;
             };
-            let Some(idx) = doc.annots.hit(page, to_page(pos), ERASER_RADIUS / zoom) else {
-                return false;
+            let to = to_page(pos);
+            let from = match doc.erasing {
+                Some((p, from)) if p == page => from,
+                _ => to,
             };
-            let stroke = doc.annots.strokes.remove(idx);
-            doc.history.push(Edit::Erased(idx, stroke));
-            true
+            doc.erasing = Some((page, to));
+            let mut erased = false;
+            while let Some(idx) = doc.annots.hit(page, from, to, ERASER_RADIUS / zoom) {
+                let stroke = doc.annots.strokes.remove(idx);
+                doc.history.push(Edit::Erased(idx, stroke));
+                erased = true;
+            }
+            erased
         }
         Tool::Hand => false,
     }
