@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use eframe::egui::{self, ColorImage};
 use mupdf::text_page::SearchHitResponse;
-use mupdf::{Colorspace, Document, Matrix, TextPageFlags};
+use mupdf::{Colorspace, Document, Font, FontHints, FontLoader, Matrix, TextPageFlags};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Job {
@@ -108,6 +108,39 @@ impl Renderer {
             query,
             from,
         });
+    }
+}
+
+/// The 14 fonts every PDF reader must provide, by the exact names MuPDF bundles them under.
+const STANDARD_FONTS: [&str; 14] = [
+    "Courier",
+    "Courier-Bold",
+    "Courier-Oblique",
+    "Courier-BoldOblique",
+    "Helvetica",
+    "Helvetica-Bold",
+    "Helvetica-Oblique",
+    "Helvetica-BoldOblique",
+    "Times-Roman",
+    "Times-Bold",
+    "Times-Italic",
+    "Times-BoldItalic",
+    "Symbol",
+    "ZapfDingbats",
+];
+
+/// MuPDF asks the system for a font a PDF doesn't embed before using its bundled copy,
+/// even for the standard 14. On Windows each system lookup scans every installed font,
+/// which took seconds per font, so answer those from MuPDF's bundled copies. Other
+/// fonts (Arial, CJK, ...) still come from the system.
+struct StandardFonts;
+
+impl FontLoader for StandardFonts {
+    fn load_font(&self, name: &str, _: FontHints) -> Option<Font> {
+        STANDARD_FONTS
+            .contains(&name)
+            .then(|| Font::new(name).ok())
+            .flatten()
     }
 }
 
@@ -227,6 +260,8 @@ fn worker(rx: Receiver<Request>, tx: Sender<Reply>, ctx: Arc<OnceLock<egui::Cont
 }
 
 fn open(path: &Path) -> Result<(Document, String, Vec<egui::Vec2>), String> {
+    static STANDARD_FONTS_LOADER: std::sync::Once = std::sync::Once::new();
+    STANDARD_FONTS_LOADER.call_once(|| mupdf::set_font_loader(StandardFonts));
     let bytes = read_pdf(path).map_err(|e| e.to_string())?;
     if !is_pdf(&bytes) {
         return Err("Only PDF files are supported".into());
@@ -363,6 +398,25 @@ mod tests {
         let image = render(&doc, job).unwrap();
         assert_eq!(pixel(&image, 50, 150), [0, 0, 0]);
         assert_eq!(pixel(&image, 150, 50), [255, 255, 255]);
+    }
+
+    #[test]
+    fn standard_fonts_come_from_mupdf_not_the_system() {
+        let font = StandardFonts.load_font("Helvetica-Bold", FontHints::default());
+        assert_eq!(
+            font.map(|f| f.name().to_string()).as_deref(),
+            Some("Helvetica-Bold")
+        );
+        assert!(
+            StandardFonts
+                .load_font("Arial", FontHints::default())
+                .is_none()
+        );
+        assert!(
+            StandardFonts
+                .load_font("helvetica", FontHints::default())
+                .is_none()
+        );
     }
 
     #[test]
